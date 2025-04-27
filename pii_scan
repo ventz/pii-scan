@@ -1,0 +1,721 @@
+#!/usr/bin/env python
+"""
+PII Scanner using AWS Comprehend
+
+This tool scans files for personally identifiable information (PII) and other sensitive data
+using AWS Comprehend and custom regex patterns. It can scan either all files in a directory
+recursively or only files that have changed in a git repository.
+
+Usage:
+    ./pii_scan [options]
+
+Options:
+    --all                   Scan all files recursively (default: only scan git changes)
+    --help, -h              Show this help message and exit
+    --config FILE           Path to configuration file
+    --min-confidence FLOAT  Minimum confidence score (0.0-1.0) for PII detection
+    --output FORMAT         Output format: text, json, or csv (default: text)
+    --custom-regex FILE     Path to file containing custom regex patterns
+    --exclude-dirs DIRS     Comma-separated list of directories to exclude
+    --exclude-exts EXTS     Comma-separated list of file extensions to exclude
+    --workers INT           Number of worker threads (default: 8)
+    --verbose, -v           Enable verbose output
+    --quiet, -q             Suppress all output except findings and errors
+    --region REGION         AWS region to use for Comprehend API
+"""
+
+import argparse
+import boto3
+import concurrent.futures
+import json
+import os
+import re
+import string
+import subprocess
+import sys
+import time
+from collections import defaultdict, Counter
+from typing import Dict, List, Tuple, Optional, Any, Set
+
+# Default configuration
+DEFAULT_CONFIG = {
+    "max_workers": 8,  # Good default for github actions
+    "max_bytes": 99000,  # AWS Comprehend's limit is 100KB per document
+    "min_confidence_score": 0.85,
+    "excluded_dirs": {".git", ".venv", "node_modules", "__pycache__"},
+    "excluded_extensions": {".min.js", ".map", ".svg", ".woff", ".ttf"},
+    "critical_entity_types": {"AWS_ACCESS_KEY", "AWS_SECRET_KEY", "PASSWORD"},
+    "security_relevant_entity_types": {
+        "AWS_ACCESS_KEY",
+        "AWS_SECRET_KEY",
+        "PASSWORD",
+    },
+    "validation_patterns": {
+        "AWS_ACCESS_KEY": r'^AKIA[0-9A-Z]{16}$',
+        "AWS_SECRET_KEY": r'^[A-Za-z0-9/+=]{40}$',
+        # Add more validation patterns as needed
+    },
+    "regex_patterns": {
+        "Generic password assignment": r'(?i)(password\s*=\s*[\'"][^\'"]+[\'"])',
+        "AWS Secret Key": r'(?i)(aws_secret_access_key\s*=\s*[\'"]?[A-Za-z0-9/+=]{40}[\'"]?)',
+        "AWS Access Key": r'(?i)(aws_access_key_id\s*=\s*[\'"]?AKIA[0-9A-Z]{16}[\'"]?)',
+        "Generic secret token": r'(?i)(secret(_key)?\s*=\s*[\'"][^\'"]+[\'"])',
+        "Bearer token": r'(?i)(Bearer\s+[A-Za-z0-9\-_=]+\.[A-Za-z0-9\-_=]+\.[A-Za-z0-9\-_.+/=]*)'
+    }
+}
+
+
+class PIIScanner:
+    """Main class for PII scanning functionality"""
+    
+    def __init__(self, config: Dict[str, Any]):
+        """
+        Initialize the PII scanner with the given configuration
+        
+        Args:
+            config: Dictionary containing configuration parameters
+        """
+        self.config = config
+        self.aws_region = config.get("region")
+        self.verbose = config.get("verbose", False)
+        self.quiet = config.get("quiet", False)
+        self.output_format = config.get("output_format", "text")
+        self.full_scan_mode = config.get("full_scan", False)
+        
+        # Initialize AWS Comprehend client
+        session_kwargs = {}
+        if self.aws_region:
+            session_kwargs["region_name"] = self.aws_region
+        
+        self.comprehend = boto3.client("comprehend", **session_kwargs)
+        
+        # Load custom regex patterns if provided
+        if "custom_regex_file" in config and config["custom_regex_file"]:
+            self._load_custom_regex(config["custom_regex_file"])
+    
+    def _load_custom_regex(self, file_path: str) -> None:
+        """
+        Load custom regex patterns from a file
+        
+        Args:
+            file_path: Path to the file containing custom regex patterns
+        """
+        try:
+            with open(file_path, 'r') as f:
+                custom_patterns = json.load(f)
+                
+            if not isinstance(custom_patterns, dict):
+                self._log_error(f"Custom regex file must contain a JSON object")
+                return
+                
+            # Merge with existing patterns, overwriting any duplicates
+            self.config["regex_patterns"].update(custom_patterns)
+            self._log_verbose(f"Loaded {len(custom_patterns)} custom regex patterns")
+        except json.JSONDecodeError:
+            self._log_error(f"Failed to parse custom regex file: invalid JSON")
+        except Exception as e:
+            self._log_error(f"Failed to load custom regex file: {e}")
+    
+    def _log_verbose(self, message: str) -> None:
+        """Log a message if verbose mode is enabled"""
+        if self.verbose and not self.quiet:
+            print(f"[INFO] {message}")
+    
+    def _log_error(self, message: str) -> None:
+        """Log an error message"""
+        if not self.quiet:
+            print(f"[ERROR] {message}", file=sys.stderr)
+    
+    def _log_warning(self, message: str) -> None:
+        """Log a warning message"""
+        if not self.quiet:
+            print(f"[WARNING] {message}", file=sys.stderr)
+    
+    def _log_progress(self, message: str, end: str = "\r") -> None:
+        """Log a progress message"""
+        if not self.quiet and not self.verbose:
+            print(message, end=end)
+    
+    def is_text_file(self, path: str, blocksize: int = 512) -> bool:
+        """
+        Check if a file is a text file
+        
+        Args:
+            path: Path to the file
+            blocksize: Number of bytes to read for the check
+            
+        Returns:
+            True if the file is a text file, False otherwise
+        """
+        # Skip certain file types known to cause false positives
+        _, ext = os.path.splitext(path.lower())
+        if ext in self.config["excluded_extensions"]:
+            return False
+        
+        # Also check for combined extensions like .min.js
+        if any(path.lower().endswith(ext) for ext in self.config["excluded_extensions"]):
+            return False
+            
+        try:
+            with open(path, 'rb') as f:
+                chunk = f.read(blocksize)
+                if not chunk:
+                    return False
+                text_chars = bytes(string.printable, 'utf-8')
+                non_text = chunk.translate(None, text_chars)
+                return float(len(non_text)) / len(chunk) < 0.30
+        except Exception as e:
+            self._log_verbose(f"Error checking if file is text: {path}: {e}")
+            return False
+    
+    def split_text_to_chunks(self, text: str) -> List[str]:
+        """
+        Split text into chunks that are smaller than AWS Comprehend's limit.
+        Uses a more aggressive approach for large files.
+        
+        Args:
+            text: Text to split
+            
+        Returns:
+            List of text chunks
+        """
+        chunks = []
+        max_bytes = self.config["max_bytes"]
+        
+        # Check if entire text is small enough
+        if len(text.encode('utf-8')) <= max_bytes:
+            return [text]
+        
+        # For larger files, need to split by lines first
+        lines = text.splitlines(True)  # keepends=True
+        current_chunk = ""
+        current_size = 0
+        
+        for line in lines:
+            line_bytes = line.encode('utf-8')
+            line_size = len(line_bytes)
+            
+            # Handle individual lines that are too large
+            if line_size > max_bytes:
+                # If we have accumulated text, add it as a chunk first
+                if current_chunk:
+                    chunks.append(current_chunk)
+                    current_chunk = ""
+                    current_size = 0
+                
+                # Split the large line into smaller chunks
+                line_chunks = []
+                for i in range(0, line_size, max_bytes):
+                    # Get a chunk of bytes that's under the limit
+                    chunk_bytes = line_bytes[i:i+max_bytes]
+                    try:
+                        # Convert bytes back to string, handling potential decoding errors
+                        chunk_text = chunk_bytes.decode('utf-8', errors='replace')
+                        line_chunks.append(chunk_text)
+                    except UnicodeDecodeError:
+                        # Skip if we can't decode
+                        continue
+                
+                # Add all the line chunks
+                chunks.extend(line_chunks)
+            
+            # Normal case: line is small enough to potentially add to current chunk
+            elif current_size + line_size <= max_bytes:
+                current_chunk += line
+                current_size += line_size
+            
+            # Line would make current chunk too big, start a new one
+            else:
+                chunks.append(current_chunk)
+                current_chunk = line
+                current_size = line_size
+        
+        # Don't forget the last chunk
+        if current_chunk:
+            chunks.append(current_chunk)
+        
+        return chunks
+    
+    def is_valid_entity(self, entity_type: str, entity_text: str) -> bool:
+        """
+        Validate if the detected entity matches expected patterns
+        
+        Args:
+            entity_type: Type of the entity
+            entity_text: Text of the entity
+            
+        Returns:
+            True if the entity is valid, False otherwise
+        """
+        # If we don't have a validation pattern, accept it
+        if entity_type not in self.config["validation_patterns"]:
+            return True
+        
+        pattern = self.config["validation_patterns"][entity_type]
+        return re.match(pattern, entity_text) is not None
+    
+    def detect_pii(self, text_chunk: str, file_text: str, offset: int = 0) -> List[Dict[str, Any]]:
+        """
+        Detect PII entities and enrich them with surrounding context
+        
+        Args:
+            text_chunk: Text chunk to analyze
+            file_text: Full file text (for context extraction)
+            offset: Offset of the chunk in the full text
+            
+        Returns:
+            List of detected PII entities
+        """
+        try:
+            # Double-check size before sending to AWS
+            chunk_size = len(text_chunk.encode('utf-8'))
+            if chunk_size > self.config["max_bytes"]:
+                self._log_warning(f"Chunk size {chunk_size} exceeds limit of {self.config['max_bytes']}. Skipping.")
+                return []
+                
+            response = self.comprehend.detect_pii_entities(Text=text_chunk, LanguageCode="en")
+            entities = response.get("Entities", [])
+            
+            validated_entities = []
+            
+            for entity in entities:
+                # Apply minimum confidence threshold
+                if entity["Score"] < self.config["min_confidence_score"]:
+                    continue
+                    
+                # Extract the actual text of the entity
+                start = entity["BeginOffset"]
+                end = entity["EndOffset"]
+                entity_text = text_chunk[start:end]
+                
+                # Skip entities that contain certain patterns indicating false positives
+                if ',' in entity_text or ']' in entity_text or '[' in entity_text:
+                    continue
+                    
+                # Validate entity against known patterns
+                if entity["Type"] in self.config["validation_patterns"] and not self.is_valid_entity(entity["Type"], entity_text):
+                    continue
+                    
+                # Store the entity text for reporting
+                entity["EntityText"] = entity_text
+                    
+                # For critical entities, try to extract context
+                if entity["Type"] in self.config["critical_entity_types"]:
+                    # Adjust for the actual position in the chunk
+                    actual_start = start + offset
+                    actual_end = end + offset
+                    
+                    # Try to extract surrounding context (line or part of line)
+                    try:
+                        # Get a window around the entity
+                        context_start = max(0, actual_start - 20)
+                        context_end = min(len(file_text), actual_end + 20)
+                        context = file_text[context_start:context_end].strip()
+                        # Truncate if too long
+                        if len(context) > 100:
+                            context = context[:97] + '...'
+                        entity["Context"] = context
+                    except Exception as e:
+                        self._log_verbose(f"Error extracting context: {e}")
+                        
+                validated_entities.append(entity)
+                    
+            return validated_entities
+        except Exception as e:
+            self._log_error(f"Error detecting PII: {e}")
+            return []
+    
+    def scan_with_regex(self, text: str) -> List[Dict[str, Any]]:
+        """
+        Scan text with regex patterns
+        
+        Args:
+            text: Text to scan
+            
+        Returns:
+            List of regex findings
+        """
+        findings = []
+        for label, pattern in self.config["regex_patterns"].items():
+            for match in re.finditer(pattern, text):
+                findings.append({
+                    "Type": f"Regex: {label}",
+                    "Snippet": match.group(0).strip(),
+                    "Offset": match.start()
+                })
+        return findings
+    
+    def get_changed_files(self) -> List[str]:
+        """
+        Get list of files changed in git
+        
+        Returns:
+            List of changed file paths
+        """
+        for base in ["origin/main", "main", "HEAD~1"]:
+            try:
+                subprocess.run(
+                    ["git", "rev-parse", "--verify", base],
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
+                result = subprocess.run(
+                    ["git", "diff", "--name-only", f"{base}...HEAD"],
+                    capture_output=True,
+                    text=True,
+                    check=True
+                )
+                files = result.stdout.strip().splitlines()
+                if not self.quiet:
+                    print(f"📂 Scanning changes against: {base} ({len(files)} changed files)")
+                return [f for f in files if os.path.isfile(f)]
+            except subprocess.CalledProcessError:
+                continue  # Try the next base
+    
+        self._log_warning("Could not determine a valid Git base for diff. Defaulting to full scan.")
+        return []
+    
+    def get_files_to_scan(self) -> List[str]:
+        """
+        Get list of files to scan
+        
+        Returns:
+            List of file paths to scan
+        """
+        current_file = os.path.abspath(__file__)
+        files = []
+    
+        if self.full_scan_mode:
+            for root, dirs, filenames in os.walk("."):
+                # Modify dirs in-place to exclude certain directories
+                dirs[:] = [d for d in dirs if d not in self.config["excluded_dirs"]]
+                for name in filenames:
+                    path = os.path.abspath(os.path.join(root, name))
+                    if path != current_file and self.is_text_file(path):
+                        files.append(path)
+        else:
+            for rel_path in self.get_changed_files():
+                abs_path = os.path.abspath(rel_path)
+                if abs_path != current_file and self.is_text_file(abs_path):
+                    files.append(abs_path)
+    
+        return files
+    
+    def process_file(self, file_path: str) -> Tuple[str, Optional[str], List[str]]:
+        """
+        Process a single file for PII detection
+        
+        Args:
+            file_path: Path to the file
+            
+        Returns:
+            Tuple of (file_path, error_message, findings)
+        """
+        findings = []
+        try:
+            # Check file size first - skip massive files
+            file_size = os.path.getsize(file_path)
+            if file_size > 10_000_000:  # 10MB
+                return (file_path, f"⚠️ Skipping large file ({file_size/1_000_000:.1f}MB): {file_path}", [])
+                
+            with open(file_path, "r", encoding='utf-8', errors='ignore') as f:
+                content = f.read()
+        except Exception as e:
+            return (file_path, f"⚠️ Skipping due to read error: {e}", [])
+    
+        # Skip empty files
+        if not content.strip():
+            return (file_path, None, [])
+            
+        # Run regex scan on the whole content
+        regex_hits = self.scan_with_regex(content)
+        
+        # Split content into manageable chunks for PII detection
+        chunks = self.split_text_to_chunks(content)
+        file_entities = []
+        chunk_offset = 0
+    
+        for chunk in chunks:
+            if not chunk.strip():  # skip empty chunks
+                chunk_offset += len(chunk)
+                continue
+            entities = self.detect_pii(chunk, content, chunk_offset)
+            filtered = [e for e in entities if e["Type"] in self.config["security_relevant_entity_types"]]
+            file_entities.extend(filtered)
+            chunk_offset += len(chunk)
+    
+        # Process findings
+        if file_entities or regex_hits:
+            findings.append(f"⚠️ Sensitive info detected in: {file_path}")
+            
+            # Group non-critical entities by type for consolidation
+            entity_by_type = defaultdict(list)
+            critical_entities = []
+            
+            for entity in file_entities:
+                if entity["Type"] in self.config["critical_entity_types"]:
+                    critical_entities.append(entity)
+                else:
+                    entity_by_type[entity["Type"]].append(entity)
+            
+            # Output critical entities with detail
+            for entity in critical_entities:
+                if "EntityText" in entity:
+                    if "Context" in entity:
+                        findings.append(f" - [PII] Type: {entity['Type']}, Score: {entity['Score']:.2f}, Value: \"{entity['EntityText']}\"")
+                        
+                        # Format multi-line context with vertical bars for each line
+                        context_lines = entity['Context'].split('\n')
+                        findings.append(f"   │ Context:")
+                        for line in context_lines:
+                            findings.append(f"   │    {line}")
+                    else:
+                        findings.append(f" - [PII] Type: {entity['Type']}, Score: {entity['Score']:.2f}, Value: \"{entity['EntityText']}\"")
+                else:
+                    findings.append(f" - [PII] Type: {entity['Type']}, Score: {entity['Score']:.2f}")
+                    
+            # Output consolidated non-critical entities
+            for entity_type, entities in entity_by_type.items():
+                if len(entities) > 3:  # Only consolidate if there are many
+                    best_score = max(e["Score"] for e in entities)
+                    findings.append(f" - [PII] Type: {entity_type}, Count: {len(entities)}, Best Score: {best_score:.2f}")
+                else:
+                    for entity in entities:
+                        if "EntityText" in entity:
+                            findings.append(f" - [PII] Type: {entity_type}, Score: {entity['Score']:.2f}, Value: \"{entity['EntityText']}\"")
+                        else:
+                            findings.append(f" - [PII] Type: {entity_type}, Score: {entity['Score']:.2f}")
+                    
+            # Add regex findings (always show in detail)
+            for regex_hit in regex_hits:
+                findings.append(f" - [Regex] {regex_hit['Type']} at offset {regex_hit['Offset']}: {regex_hit['Snippet']}")
+                
+            return (file_path, None, findings)
+        else:
+            return (file_path, None, [])
+    
+    def format_output(self, all_findings: List[List[str]]) -> str:
+        """
+        Format the findings according to the specified output format
+        
+        Args:
+            all_findings: List of findings for each file
+            
+        Returns:
+            Formatted output string
+        """
+        if self.output_format == "json":
+            # Convert to JSON format
+            json_output = []
+            for file_findings in all_findings:
+                if not file_findings:
+                    continue
+                    
+                file_path = file_findings[0].split(": ", 1)[1]
+                issues = []
+                
+                for line in file_findings[1:]:
+                    if line.startswith(" - "):
+                        issues.append(line[3:])
+                
+                json_output.append({
+                    "file": file_path,
+                    "issues": issues
+                })
+                
+            return json.dumps(json_output, indent=2)
+            
+        elif self.output_format == "csv":
+            # Convert to CSV format
+            csv_lines = ["file,issue_type,details"]
+            
+            for file_findings in all_findings:
+                if not file_findings:
+                    continue
+                    
+                file_path = file_findings[0].split(": ", 1)[1]
+                
+                for line in file_findings[1:]:
+                    if line.startswith(" - "):
+                        parts = line[3:].split(": ", 1)
+                        if len(parts) == 2:
+                            issue_type = parts[0]
+                            details = parts[1].replace('"', '""')  # Escape quotes for CSV
+                            csv_lines.append(f'"{file_path}","{issue_type}","{details}"')
+                        else:
+                            csv_lines.append(f'"{file_path}","{line[3:]}",""')
+            
+            return "\n".join(csv_lines)
+            
+        else:  # Default to text format
+            output_lines = []
+            separator = "─" * 70  # Create a separator line
+            
+            for i, file_findings in enumerate(all_findings):
+                # Add a separator before each file's findings
+                output_lines.append(separator)
+                
+                for line in file_findings:
+                    output_lines.append(line)
+                
+                # Add a separator after each file's findings
+                output_lines.append(separator)
+                
+                # Add a newline between file findings (but not after the last one)
+                if i < len(all_findings) - 1:
+                    output_lines.append("")
+            
+            return "\n".join(output_lines)
+    
+    def scan(self) -> bool:
+        """
+        Run the PII scan
+        
+        Returns:
+            True if issues were found, False otherwise
+        """
+        issues_found = False
+        files_to_scan = self.get_files_to_scan()
+        all_findings = []
+    
+        if not files_to_scan:
+            if self.full_scan_mode:
+                self._log_error("No files found during full scan. Something went wrong.")
+                return True  # Return error status
+            else:
+                if not self.quiet:
+                    print("🔍 No changed text files to scan (diff mode).")
+                return False
+    
+        total_files = len(files_to_scan)
+        if not self.quiet:
+            print(f"🔍 Scanning {total_files} files for sensitive information...")
+        
+        start_time = time.time()
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.config["max_workers"]) as executor:
+            futures = {executor.submit(self.process_file, path): path for path in files_to_scan}
+            for i, future in enumerate(concurrent.futures.as_completed(futures)):
+                file_path, error_msg, findings = future.result()
+                if error_msg:
+                    if not self.quiet:
+                        print(error_msg)
+                        print()  # Add extra newline for spacing
+                elif findings:
+                    issues_found = True
+                    all_findings.append(findings)
+                
+                # Periodically show progress
+                if not self.quiet and (i+1) % 10 == 0 or (i+1) == total_files:
+                    elapsed = time.time() - start_time
+                    files_per_sec = (i+1) / elapsed if elapsed > 0 else 0
+                    self._log_progress(f"Progress: {i+1}/{total_files} files processed ({files_per_sec:.1f} files/sec)", end="\r")
+        
+        # Print findings with proper spacing
+        if all_findings:
+            if not self.quiet:
+                print("\n")  # Clear the progress line and add spacing
+                
+            # Format and print the output
+            output = self.format_output(all_findings)
+            print(output)
+    
+        if issues_found:
+            if not self.quiet:
+                print("\n❌ Potential secrets/passwords found. Please remove or secure them.")
+            return True
+        else:
+            if not self.quiet:
+                print("\n✅ No secrets or passwords detected.")
+            return False
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command line arguments"""
+    parser = argparse.ArgumentParser(
+        description="Scan files for PII and sensitive information using AWS Comprehend",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__
+    )
+    
+    parser.add_argument("--all", action="store_true", help="Scan all files recursively (default: only scan git changes)")
+    parser.add_argument("--config", type=str, help="Path to configuration file")
+    parser.add_argument("--min-confidence", type=float, help="Minimum confidence score (0.0-1.0) for PII detection")
+    parser.add_argument("--output", choices=["text", "json", "csv"], default="text", help="Output format")
+    parser.add_argument("--custom-regex", type=str, help="Path to file containing custom regex patterns")
+    parser.add_argument("--exclude-dirs", type=str, help="Comma-separated list of directories to exclude")
+    parser.add_argument("--exclude-exts", type=str, help="Comma-separated list of file extensions to exclude")
+    parser.add_argument("--workers", type=int, help="Number of worker threads")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose output")
+    parser.add_argument("--quiet", "-q", action="store_true", help="Suppress all output except findings and errors")
+    parser.add_argument("--region", type=str, help="AWS region to use for Comprehend API")
+    
+    return parser.parse_args()
+
+
+def load_config(args: argparse.Namespace) -> Dict[str, Any]:
+    """
+    Load configuration from default config, config file, and command line arguments
+    
+    Args:
+        args: Command line arguments
+        
+    Returns:
+        Configuration dictionary
+    """
+    # Start with default config
+    config = DEFAULT_CONFIG.copy()
+    
+    # Load from config file if provided
+    if args.config:
+        try:
+            with open(args.config, 'r') as f:
+                file_config = json.load(f)
+                config.update(file_config)
+        except Exception as e:
+            print(f"Error loading config file: {e}", file=sys.stderr)
+    
+    # Override with command line arguments
+    config["full_scan"] = args.all
+    config["output_format"] = args.output
+    config["verbose"] = args.verbose
+    config["quiet"] = args.quiet
+    config["custom_regex_file"] = args.custom_regex
+    config["region"] = args.region
+    
+    if args.min_confidence is not None:
+        config["min_confidence_score"] = args.min_confidence
+        
+    if args.workers is not None:
+        config["max_workers"] = args.workers
+        
+    if args.exclude_dirs:
+        additional_dirs = set(args.exclude_dirs.split(','))
+        config["excluded_dirs"].update(additional_dirs)
+        
+    if args.exclude_exts:
+        additional_exts = set(args.exclude_exts.split(','))
+        config["excluded_extensions"].update(additional_exts)
+    
+    return config
+
+
+def main() -> int:
+    """Main entry point"""
+    # Check if help is requested
+    if "--help" in sys.argv or "-h" in sys.argv:
+        print(__doc__)
+        return 0
+        
+    args = parse_args()
+    config = load_config(args)
+    
+    scanner = PIIScanner(config)
+    issues_found = scanner.scan()
+    
+    return 1 if issues_found else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

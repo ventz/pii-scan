@@ -1,0 +1,122 @@
+name: 'PII Scanner'
+description: 'Scan code for PII and sensitive information using AWS Comprehend'
+author: 'Ventz Petkov'
+
+inputs:
+  scan-all:
+    description: 'Scan all files recursively instead of just changed files'
+    required: false
+    default: 'false'
+  min-confidence:
+    description: 'Minimum confidence score (0.0-1.0) for PII detection'
+    required: false
+    default: '0.85'
+  output-format:
+    description: 'Output format: text, json, or csv'
+    required: false
+    default: 'text'
+  custom-regex-file:
+    description: 'Path to file containing custom regex patterns'
+    required: false
+  exclude-dirs:
+    description: 'Comma-separated list of directories to exclude'
+    required: false
+  exclude-exts:
+    description: 'Comma-separated list of file extensions to exclude'
+    required: false
+  workers:
+    description: 'Number of worker threads'
+    required: false
+    default: '8'
+  verbose:
+    description: 'Enable verbose output'
+    required: false
+    default: 'false'
+  quiet:
+    description: 'Suppress all output except findings and errors'
+    required: false
+    default: 'false'
+  aws-region:
+    description: 'AWS region to use for Comprehend API'
+    required: false
+    default: 'us-east-1'
+  config-file:
+    description: 'Path to configuration file'
+    required: false
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install AWS CLI and Boto3
+      shell: bash
+      run: |
+        pip install awscli boto3
+
+    - name: Run PII Scan
+      shell: bash
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        AWS_DEFAULT_REGION: ${{ inputs.aws-region }}
+      run: |
+        # Build command with inputs
+        CMD="python ${{ github.action_path }}/pii-engine/pii_scan"
+
+        # Add optional arguments based on inputs
+        if [ "${{ inputs.scan-all }}" == "true" ]; then
+          CMD="$CMD --all"
+        fi
+
+        if [ -n "${{ inputs.min-confidence }}" ]; then
+          CMD="$CMD --min-confidence ${{ inputs.min-confidence }}"
+        fi
+
+        if [ -n "${{ inputs.output-format }}" ]; then
+          CMD="$CMD --output ${{ inputs.output-format }}"
+        fi
+
+        if [ -n "${{ inputs.custom-regex-file }}" ]; then
+          CMD="$CMD --custom-regex ${{ inputs.custom-regex-file }}"
+        fi
+
+        if [ -n "${{ inputs.exclude-dirs }}" ]; then
+          CMD="$CMD --exclude-dirs \"${{ inputs.exclude-dirs }}\""
+        fi
+
+        if [ -n "${{ inputs.exclude-exts }}" ]; then
+          CMD="$CMD --exclude-exts \"${{ inputs.exclude-exts }}\""
+        fi
+
+        if [ -n "${{ inputs.workers }}" ]; then
+          CMD="$CMD --workers ${{ inputs.workers }}"
+        fi
+
+        if [ "${{ inputs.verbose }}" == "true" ]; then
+          CMD="$CMD --verbose"
+        fi
+
+        if [ "${{ inputs.quiet }}" == "true" ]; then
+          CMD="$CMD --quiet"
+        fi
+
+        if [ -n "${{ inputs.config-file }}" ]; then
+          CMD="$CMD --config ${{ inputs.config-file }}"
+        fi
+
+        # Execute the command
+        echo "Running: $CMD"
+        eval $CMD
+
+branding:
+  icon: 'shield'
+  color: 'red'
