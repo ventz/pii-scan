@@ -1,0 +1,7 @@
+[project]
+name = "pii-scan"
+version = "1.0.0"
+requires-python = ">=3.13"
+dependencies = [
+    "boto3>=1.40.55",
+]
