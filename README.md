@@ -1,15 +1,19 @@
-# pii-scan
+<div align="center">
 
-<p align="center">
-  <img src="docs/images/pii-scan-icon.png" alt="pii-scan logo: a document with highlighted lines inside a scanner frame, with a shield" width="160">
-</p>
+<img src="docs/images/pii-scan-icon.png" alt="pii-scan logo: a document with highlighted lines inside a scanner frame, with a shield" width="160">
 
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)
+<h1>pii-scan</h1>
 
+<p>
 Find and mask personal data and secrets in files, repositories, and file shares.
 Fast local regex validators run on everything; optional AWS layers (Comprehend and Bedrock
 Guardrails) add context-aware detection only where it is needed.
+</p>
+
+<a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
+<img src="https://img.shields.io/badge/python-3.11%2B-blue.svg" alt="Python 3.11+">
+
+</div>
 
 ## Table of Contents
 
