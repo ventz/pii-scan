@@ -1,5 +1,9 @@
 # pii-scan
 
+<p align="center">
+  <img src="docs/images/pii-scan-icon.png" alt="pii-scan logo: a document with highlighted lines inside a scanner frame, with a shield" width="160">
+</p>
+
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)
 
