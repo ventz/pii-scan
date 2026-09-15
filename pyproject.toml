@@ -10,7 +10,10 @@ requires-python = ">=3.11"
 dependencies = [
     "boto3>=1.40.55",
 ]
-keywords = ["pii", "secrets", "redaction", "masking", "aws-comprehend", "dlp"]
+keywords = [
+    "pii", "data-privacy", "sensitive-data", "aws-comprehend", "regex", "security-scanner",
+    "github-actions", "secrets", "redaction", "masking", "dlp",
+]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Environment :: Console",
