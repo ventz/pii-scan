@@ -50,8 +50,8 @@ Apple M3:
 
 | Workers | Files per second | Peak memory |
 |---------|------------------|-------------|
-| 1 | about 3,300 | about 31 MB |
-| 16 | about 3,800 | about 32 MB |
+| 1 | about 3,800 | about 31 MB |
+| 16 | about 4,300 | about 32 MB |
 
 On local disks the CPU is the limit, so more workers add little. On network shares the limit is
 per-file latency, and more workers help until the file server pushes back:
@@ -83,7 +83,9 @@ Skipped: binary 88,120, symlink 2,901, extension 529
 ```
 
 - **Not scanned** files need attention: permissions (`open_failed`), size (`too_large`, raise
-  `--max-file-size`), or encoding (`undecodable`). The first examples are listed; the JSONL report
+  `--max-file-size`), encoding (`undecodable`), one rule matching more than
+  `max_matches_per_rule` times (`match_limit`, raise it in the configuration), or a path that
+  resolved outside the scan root (`outside_root`, investigate). The first examples are listed; the JSONL report
   has every one (`"status": "not_scanned"`).
 - **Skipped** files were excluded on purpose. `binary` includes PDF and Office documents, which
   are not extracted yet ([roadmap](architecture.md#roadmap)).
@@ -109,8 +111,10 @@ jq -r 'select(.kind=="file" and .status=="not_scanned") | "\(.reason)\t\(.path)"
   per second, which is too slow for hundreds of thousands of files. Request quota increases in
   Service Quotas, then set `--max-tps-contains` and `--max-tps-detect` to about 80% of the new
   limits.
-- **Check the estimate.** The summary prints AWS calls and an estimated cost; scan one
-  representative folder first and extrapolate.
+- **Check the estimate.** The summary prints AWS calls, characters sent, and an estimated cost;
+  scan one representative folder first and extrapolate.
+- **Set a ceiling.** `--aws-max-chars` stops the run once that many characters have been sent, so
+  a share full of unexpectedly large or PII-dense files can't run up the bill. Resume with the cache.
 - **Credentials.** Long runs need credentials that outlast the run (an instance role, or a role
   session longer than the expected duration). If credentials expire mid-run, pii-scan stops with
   exit code `2`; resume with the cache.

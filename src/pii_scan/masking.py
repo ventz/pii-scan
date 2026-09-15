@@ -49,7 +49,7 @@ class Masker:
             if len(value) >= 8:
                 return _stars(value[:-4]) + value[-4:]
             return _stars(value)
-        return f"[{entity_type}:{self.fingerprint(value)[:8]}]"
+        return f"[{entity_type}:{self.fingerprint(value)[:12]}]"  # 48 bits: collisions stay rare at share scale
 
     def apply(self, text: str, regions: list[MergedSpan]) -> str:
         """Single forward pass over disjoint, sorted regions (see spans.merge)."""
@@ -81,7 +81,7 @@ def preview(value: str, entity_type: str, *, reveal: bool = False) -> str:
 
 def write_atomic(dest: Path, data: bytes, *, mode: int = 0o600) -> None:
     """Write via a same-directory temp file, fsync, then rename. Never follows a symlink at dest."""
-    dest.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    _make_private_dirs(dest.parent)
     if dest.is_symlink():
         raise OSError(f"refusing to write through symlink: {dest}")
     fd, tmp = tempfile.mkstemp(prefix=".pii-scan-", dir=dest.parent)
@@ -98,10 +98,33 @@ def write_atomic(dest: Path, data: bytes, *, mode: int = 0o600) -> None:
         raise
 
 
+def _make_private_dirs(path: Path) -> None:
+    """Create every missing directory with mode 0700 (mkdir(parents=True) only applies it to the last)."""
+    missing: list[Path] = []
+    p = path
+    while not p.exists():
+        missing.append(p)
+        p = p.parent
+    for d in reversed(missing):
+        with contextlib.suppress(FileExistsError):
+            d.mkdir(mode=0o700)
+
+
 def safe_output_path(out_root: Path, relpath: str) -> Path:
-    """Resolve `relpath` under `out_root`, rejecting anything that escapes it."""
+    """Place `relpath` under `out_root`, rejecting `..`, absolute paths, and symlinked parents.
+
+    The final component is deliberately not resolved, so `write_atomic` can refuse a symlink there.
+    """
     root = out_root.resolve()
-    candidate = (root / relpath).resolve()
-    if candidate != root and root not in candidate.parents:
+    norm = os.path.normpath(relpath)
+    if os.path.isabs(norm) or norm == os.pardir or norm.startswith(os.pardir + os.sep):
         raise ValueError(f"output path escapes output directory: {relpath}")
+    candidate = root / norm
+    existing = candidate.parent
+    while not existing.exists():
+        existing = existing.parent
+    real_parent = existing.resolve()
+    # the deepest existing directory must be the root, inside it, or (root not created yet) above it
+    if real_parent != root and root not in real_parent.parents and real_parent not in root.parents:
+        raise ValueError(f"output path escapes output directory through a symlink: {relpath}")
     return candidate

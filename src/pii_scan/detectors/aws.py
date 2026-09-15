@@ -52,6 +52,7 @@ class AwsSettings:
     guardrail_version: str = "DRAFT"
     max_attempts: int = 8
     pool_size: int = 32
+    max_chars: int | None = None  # cost ceiling: characters sent to AWS per run
 
 
 @dataclass
@@ -60,6 +61,7 @@ class Usage:
 
     units: dict[str, int] = field(default_factory=lambda: {"contains": 0, "detect": 0, "guardrails": 0})
     calls: dict[str, int] = field(default_factory=lambda: {"contains": 0, "detect": 0, "guardrails": 0})
+    chars: int = 0
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def add(self, api: str, units: int) -> None:
@@ -100,9 +102,10 @@ class AwsSession:
             max_pool_connections=settings.pool_size,
             connect_timeout=10,
             read_timeout=60,
-            # Ignore AWS_ENDPOINT_URL* from the environment unless an endpoint is set explicitly,
-            # so a planted .env or shell variable cannot redirect scanned content elsewhere.
-            ignore_configured_endpoint_urls=settings.endpoint_url is None,
+            # Always ignore AWS_ENDPOINT_URL* and endpoint_url from the environment and shared config,
+            # so a planted .env or shell variable cannot redirect scanned content for any service.
+            # An explicit aws.endpoint_url is still passed to the Comprehend client below.
+            ignore_configured_endpoint_urls=True,
         )
         self._clients: dict[str, object] = {}
         self._lock = threading.Lock()
@@ -132,7 +135,21 @@ class AwsSession:
             raise _wrap(exc, "sts:GetCallerIdentity") from exc
         return {"account": ident.get("Account", ""), "arn": ident.get("Arn", ""), "region": self.region}
 
-    def _acquire(self, api: str, tokens: float) -> None:
+    def _acquire(self, api: str, tokens: float, chars: int) -> None:
+        limit = self.settings.max_chars
+        if limit is not None:
+            with self.usage._lock:
+                over = self.usage.chars + chars > limit
+                if not over:
+                    self.usage.chars += chars
+            if over:
+                raise DetectorError(
+                    f"AWS character budget of {limit:,} reached; stopping (raise --aws-max-chars to continue)",
+                    fatal=True,
+                )
+        else:
+            with self.usage._lock:
+                self.usage.chars += chars
         if not self.buckets[api].acquire(tokens, self.stop):
             raise DetectorError("interrupted")
 
@@ -173,7 +190,7 @@ class ContainsScreen:
     def screen(self, text: str) -> set[str]:
         """Return the relevant entity types present at or above the threshold."""
         units = comprehend_units(text)
-        self.aws._acquire("contains", 1)
+        self.aws._acquire("contains", 1, len(text))
         try:
             resp = self.aws.client("comprehend").contains_pii_entities(
                 Text=text, LanguageCode=self.aws.settings.language
@@ -201,7 +218,7 @@ class ComprehendDetector:
 
     def detect(self, text: str) -> list[Span]:
         units = comprehend_units(text)
-        self.aws._acquire("detect", 1)
+        self.aws._acquire("detect", 1, len(text))
         try:
             resp = self.aws.client("comprehend").detect_pii_entities(
                 Text=text, LanguageCode=self.aws.settings.language
@@ -253,7 +270,7 @@ class GuardrailsDetector:
 
     def detect(self, text: str) -> list[Span]:
         units = guardrail_units(text)
-        self.aws._acquire("guardrails", units)
+        self.aws._acquire("guardrails", units, len(text))
         s = self.aws.settings
         try:
             resp = self.aws.client("bedrock-runtime").apply_guardrail(

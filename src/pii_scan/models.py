@@ -81,8 +81,5 @@ class FileResult:
     mtime_ns: int = 0
     sha256: str = ""
     suppressed: int = 0  # findings hidden by the baseline
+    suppressed_findings: list[Finding] = field(default_factory=list)  # kept for masking and baselines
     cached: bool = False
-
-    @property
-    def max_severity(self) -> Severity | None:
-        return max((f.severity for f in self.findings), default=None)

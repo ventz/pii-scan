@@ -57,7 +57,8 @@ steps:
 ```
 
 Code scanning on private repositories requires GitHub Code Security. SARIF uploads are limited to
-25,000 results per run; pii-scan caps its output at that limit.
+25,000 results per run; pii-scan caps its output at that limit. The report is uploaded only when
+the scan completed (exit code `0` or `1`), so an incomplete scan can't close alerts that still exist.
 
 ## AWS layers with OIDC
 
@@ -97,7 +98,7 @@ for those, or run AWS layers only on `push`.
 | `fail-on` | `high` | `critical`, `high`, `medium`, `low`, `any`, or `never` |
 | `min-confidence` | | Minimum score for AWS detections |
 | `output-format` | `sarif` | `sarif`, `jsonl`, `json`, `csv`, or `text` |
-| `report-path` | `pii-scan-report.sarif` | Report file |
+| `report-path` | `$RUNNER_TEMP/pii-scan-report.<format>` | Report file; the default is outside the workspace so a pull request can't plant a file or symlink there |
 | `upload-sarif` | `false` | Upload the report to code scanning (needs `security-events: write`) |
 | `custom-regex-file` | | Custom rules file |
 | `config-file` | | Configuration file |
@@ -142,7 +143,8 @@ Policy for the scanning role (drop the actions for layers you don't use):
 }
 ```
 
-Trust policy for GitHub OIDC, limited to one repository:
+Trust policy for GitHub OIDC, limited to one repository's `main` branch (AWS layers then run on
+pushes to `main`; widen the `sub` condition deliberately, for example to a protected environment):
 
 ```json
 {
@@ -153,8 +155,10 @@ Trust policy for GitHub OIDC, limited to one repository:
       "Principal": { "Federated": "arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com" },
       "Action": "sts:AssumeRoleWithWebIdentity",
       "Condition": {
-        "StringEquals": { "token.actions.githubusercontent.com:aud": "sts.amazonaws.com" },
-        "StringLike": { "token.actions.githubusercontent.com:sub": "repo:your-org/your-repo:*" }
+        "StringEquals": {
+          "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+          "token.actions.githubusercontent.com:sub": "repo:your-org/your-repo:ref:refs/heads/main"
+        }
       }
     }
   ]
@@ -164,10 +168,15 @@ Trust policy for GitHub OIDC, limited to one repository:
 ## Notes
 
 - **Pin the action.** Use a release tag (`@v1.1.0`) or, for the strongest guarantee, a full commit SHA.
-- **Policy lives in the workflow.** A pull request can edit files in its own tree, including a
-  configuration file passed with `config-file`. Keep `fail-on` and `layers` as workflow inputs so
-  a pull request can't loosen them.
+- **Policy lives in the workflow.** A pull request can edit files in its own tree, including the
+  files passed as `config-file` and `custom-regex-file`. The action runs with
+  `--restricted-config`, so those files can only add rules or raise severities; attempts to lower
+  severities, add excludes, change limits, or change AWS settings stop the run. Keep `fail-on` and
+  `layers` as workflow inputs.
+- **Cost ceiling.** With AWS layers, consider a config or wrapper that sets `--aws-max-chars` for
+  scheduled full scans, so unexpectedly large inputs can't run up the bill.
 - **Inputs are data.** The action passes inputs to pii-scan through environment variables and a
   bash array, never through `eval`, and validates booleans and numbers.
-- **Runtime.** The action installs [uv](https://docs.astral.sh/uv/) with a pinned
-  `astral-sh/setup-uv` and runs pii-scan from the action's own lockfile (`uv run --locked`).
+- **Runtime.** The action installs a pinned [uv](https://docs.astral.sh/uv/) version with a
+  SHA-pinned `astral-sh/setup-uv`, and runs pii-scan from the action's own lockfile
+  (`uv run --locked --no-dev`) with the build backend pinned.

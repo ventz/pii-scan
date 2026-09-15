@@ -31,6 +31,7 @@
 | `PATH ...` | `.` | Files or directories |
 | `--all` | off | Scan everything under the paths instead of only git changes |
 | `--base REF` | auto | Git ref to diff against (changed-files mode) |
+| `--trust-repo` | off | Allow changed-files mode when the repository's own `.git/config` sets filters, includes, fsmonitor, or diff commands, which could run commands (refused by default) |
 | `--exclude-dirs A,B` | see [defaults](#default-excludes) | Directory names to skip, added to the defaults |
 | `--exclude-exts .a,.b` | see defaults | File suffixes to skip, added to the defaults |
 | `--exclude GLOB` | none | Root-relative glob to skip, repeatable (`archive/**`) |
@@ -46,6 +47,7 @@
 | `--layers LIST` | `regex` | Any of `regex,contains,guardrails,detect`, in order ([Detection Layers](detection-layers.md)) |
 | `--config FILE` | none | JSON configuration file |
 | `--custom-regex FILE` | none | Custom regex rules ([format](#custom-regex-rules)) |
+| `--restricted-config` | off | Treat `--config` and `--custom-regex` as untrusted: they may only add rules or raise severities (used by the GitHub Action) |
 | `--min-confidence F` | `0.85` | Minimum score for `detect` results |
 | `--screen-threshold F` | `0.5` | Minimum `contains` label score to escalate a chunk |
 | `--entity-types LIST` | all except `DATE_TIME,URL,AGE` | AWS entity types to report |
@@ -56,6 +58,7 @@
 | `--guardrail-version V` | `DRAFT` | Guardrail version |
 | `--max-tps-contains N` | `20` | ContainsPiiEntities requests per second |
 | `--max-tps-detect N` | `40` | DetectPiiEntities requests per second |
+| `--aws-max-chars N` | none | Cost ceiling: stop the run (exit `2`) once N characters have been sent to AWS |
 
 ### Policy
 
@@ -66,8 +69,9 @@
 | `--baseline FILE` | none | Ignore findings recorded in this baseline |
 | `--write-baseline FILE` | none | Record all current findings as a baseline |
 
-Baselines key findings by path, type, and a keyed fingerprint, so both flags need
-`PII_SCAN_HMAC_KEY` set to the same value on every run.
+Baselines key findings by path (relative to the working directory, so the same baseline works in
+`--all` and changed-files mode), type, and a keyed fingerprint. Both flags need
+`PII_SCAN_HMAC_KEY` (at least 16 bytes) set to the same value on every run.
 
 ### Masking
 
@@ -124,7 +128,7 @@ exit code `2`.
   "validation_patterns": { "AWS_ACCESS_KEY": "(?:AKIA|ASIA)[0-9A-Z]{16}" },
   "custom_rules": "custom_regex_patterns.json",
   "exclude": { "dirs": ["dist"], "extensions": [".png"], "globs": ["archive/**"], "files": [], "replace_defaults": false },
-  "limits": { "workers": 32, "max_file_size": 10000000, "max_matches_per_rule": 500 },
+  "limits": { "workers": 32, "max_file_size": 10000000, "max_matches_per_rule": 10000 },
   "aws": {
     "region": "us-east-1", "profile": null, "endpoint_url": null, "language": "en",
     "tps_contains": 20, "tps_detect": 40, "guardrail_chars_per_second": 20000,
@@ -144,12 +148,14 @@ exit code `2`.
 | `validation_patterns` | Map of entity type to a regex that AWS matches must fully match |
 | `custom_rules` | Custom rules file, relative to the configuration file |
 | `exclude` | Lists added to the defaults; `replace_defaults: true` replaces them |
-| `limits` | `workers`, `max_file_size`, `max_matches_per_rule` |
+| `limits` | `workers`, `max_file_size`, `max_matches_per_rule` (a file where one rule matches more often is reported as not scanned, never partially masked) |
 | `aws` | Region, profile, endpoint (for example a VPC endpoint), language, rate limits, guardrail |
 | `mask` | `style` and `findings_only` |
 
-Keep configuration files you rely on for CI outside the code being scanned, or pass policy flags
-such as `--fail-on` explicitly: a pull request can edit files in its own tree.
+A pull request can edit files in its own tree. When the configuration file or custom rules come
+from the code being scanned, pass `--restricted-config`: the file may then only add rules
+(`custom_rules`, `regex_patterns`) or raise severities (`severity`, `critical_entity_types`), and
+anything else stops the run. The GitHub Action always does this.
 
 ## 1.0 configuration keys
 
@@ -215,9 +221,9 @@ Skipped files are counted by reason in the summary.
 
 | Variable | Effect |
 |----------|--------|
-| `PII_SCAN_HMAC_KEY` | Key for fingerprints and `hash` masking. Required for baselines; set it to keep pseudonyms stable across runs. Without it, a random per-run key is used. |
+| `PII_SCAN_HMAC_KEY` | Key for fingerprints and `hash` masking, at least 16 bytes. Required for baselines; set it to keep pseudonyms and SARIF fingerprints stable across runs. Without it, a random per-run key is used. |
 | `AWS_PROFILE`, `AWS_REGION`, `AWS_DEFAULT_REGION` | Standard AWS settings, used when flags don't set them |
 | `AWS_ENDPOINT_URL*` | Ignored unless `aws.endpoint_url` is set, so the environment can't redirect scanned text |
-| `CI` | When set, `--show-values` is refused and progress defaults to plain lines |
+| `CI` (and `GITHUB_ACTIONS`, `GITLAB_CI`, `JENKINS_URL`, `TF_BUILD`, `BUILDKITE`, `CIRCLECI`, and similar) | `--show-values` is refused; `CI` also makes progress default to plain lines |
 | `GITHUB_STEP_SUMMARY` | Target for the job summary with `--github` |
 | `GITHUB_BASE_REF` | Used to find the diff base in pull request workflows |

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
+from dataclasses import replace
 from pathlib import Path
 
 from .models import FileResult, Finding, Severity, Status
@@ -23,11 +25,31 @@ CREATE TABLE IF NOT EXISTS files (
 """
 
 
+def json_safe(text: str) -> str:
+    """Escape lone surrogates (undecodable bytes in file names) so the text encodes as UTF-8."""
+    if text.isascii():
+        return text
+    return text.encode("utf-8", "backslashreplace").decode("utf-8")
+
+
+def report_path(path: str) -> str:
+    """Path relative to the working directory with '/' separators.
+
+    Used for baselines, SARIF, and GitHub annotations so they agree between `--all` and
+    changed-files mode, and point at workspace files in CI.
+    """
+    try:
+        rel = os.path.relpath(path)
+    except ValueError:  # a different drive on Windows
+        rel = path
+    return json_safe(rel.replace(os.sep, "/"))
+
+
 class ResultCache:
     """Skip files unchanged since a previous run with the same configuration.
 
-    Stores statuses and masked findings only, never raw text. Keep the database on local disk,
-    not on the share being scanned. Only CLEAN and FINDINGS results are cached.
+    Stores statuses and masked findings (before any baseline is applied), never raw text. Keep the
+    database on local disk, not on the share being scanned. Only CLEAN and FINDINGS are cached.
     """
 
     def __init__(self, path: Path, config_hash: str) -> None:
@@ -38,6 +60,10 @@ class ResultCache:
         conn = self._conn()
         conn.executescript(_SCHEMA)
         conn.commit()
+        for suffix in ("", "-wal", "-shm"):  # results reveal where sensitive data lives: owner-only
+            p = Path(f"{path}{suffix}")
+            if p.exists():
+                os.chmod(p, 0o600)
         self._pending = 0
 
     def _conn(self) -> sqlite3.Connection:
@@ -53,18 +79,21 @@ class ResultCache:
         row = self._conn().execute(
             "SELECT result FROM files WHERE source=? AND path=? AND size=? AND mtime_ns=? AND etag=? "
             "AND config_hash=?",
-            (source, path, size, mtime_ns, etag, self.config_hash),
+            (source, json_safe(path), size, mtime_ns, etag, self.config_hash),
         ).fetchone()
         return _result_from_json(row[0]) if row else None
 
     def put(self, source: str, result: FileResult, mtime_ns: int, etag: str = "") -> None:
         if result.status not in (Status.CLEAN, Status.FINDINGS):
             return
+        everything = result.findings + result.suppressed_findings
+        stored = replace(result, findings=everything, suppressed_findings=[], suppressed=0,
+                         status=Status.FINDINGS if everything else Status.CLEAN)  # fmt: skip
         conn = self._conn()
         conn.execute(
             "INSERT OR REPLACE INTO files(source, path, size, mtime_ns, etag, config_hash, result) "
             "VALUES (?,?,?,?,?,?,?)",
-            (source, result.path, result.size, mtime_ns, etag, self.config_hash, _result_to_json(result)),
+            (source, json_safe(result.path), result.size, mtime_ns, etag, self.config_hash, _result_to_json(stored)),
         )
         self._pending += 1
         if self._pending >= 500:
@@ -117,7 +146,10 @@ def finding_from_dict(d: dict) -> Finding:
 
 
 class Baseline:
-    """Accepted findings, keyed by keyed fingerprint (requires a stable PII_SCAN_HMAC_KEY)."""
+    """Accepted findings, keyed by working-directory-relative path, type, and keyed fingerprint.
+
+    Requires a stable PII_SCAN_HMAC_KEY so fingerprints match between runs.
+    """
 
     def __init__(self, fingerprints: set[str]) -> None:
         self.fingerprints = fingerprints
@@ -133,13 +165,15 @@ class Baseline:
         return cls({str(x) for x in data["fingerprints"]})
 
     @staticmethod
-    def key(f: Finding, relpath: str) -> str:
-        return f"{relpath}|{f.type}|{f.fingerprint}"
+    def key(f: Finding) -> str:
+        return f"{report_path(f.path)}|{f.type}|{f.fingerprint}"
 
     def __contains__(self, key: str) -> bool:
         return key in self.fingerprints
 
     @staticmethod
     def write(path: Path, keys: set[str]) -> None:
-        path.write_text(json.dumps({"version": 1, "fingerprints": sorted(keys)}, indent=2) + "\n",
-                        encoding="utf-8")  # fmt: skip
+        from .masking import write_atomic
+
+        data = json.dumps({"version": 1, "fingerprints": sorted(keys)}, indent=2) + "\n"
+        write_atomic(path, data.encode("utf-8"))

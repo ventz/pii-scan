@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import stat
 import subprocess
 from collections.abc import Iterator
 from pathlib import Path
@@ -67,11 +68,51 @@ def resolve_base(top: Path, base: str | None) -> str:
     )
 
 
+_LFS_VALUES = {
+    "filter.lfs.clean": "git-lfs clean -- %f", "filter.lfs.smudge": "git-lfs smudge -- %f",
+    "filter.lfs.process": "git-lfs filter-process", "filter.lfs.required": "true",
+}  # fmt: skip
+
+
+def _risky_config_keys(top: Path) -> list[str]:
+    """Repository-level git settings that could make `git diff` run commands.
+
+    Global and system config are the operator's own; repository config on a share or in a
+    downloaded repo is attacker-controlled. Config files are read with --file, which never follows
+    includes or runs anything.
+    """
+    common = Path(_git(top, "rev-parse", "--git-common-dir").decode().strip())
+    gitdir = common if common.is_absolute() else top / common
+    risky: list[str] = []
+    for cfg in (gitdir / "config", gitdir / "config.worktree"):
+        if not cfg.is_file():
+            continue
+        out = _git(top, "config", "--file", str(cfg), "--null", "--list").decode("utf-8", "replace")
+        for entry in filter(None, out.split("\0")):
+            name, _, value = entry.partition("\n")
+            key = name.lower()
+            if key in _LFS_VALUES and value.strip() == _LFS_VALUES[key]:
+                continue
+            if (key.startswith(("filter.", "include.", "includeif.")) or key in {
+                "core.fsmonitor", "core.worktree", "core.sshcommand", "core.askpass", "diff.external",
+            } or (key.startswith("diff.") and key.endswith((".textconv", ".command")))):  # fmt: skip
+                risky.append(name)
+    return sorted(set(risky))
+
+
 class GitChangedSource:
-    def __init__(self, path: Path, base: str | None, excludes: Excludes, *, max_file_size: int) -> None:
+    def __init__(self, path: Path, base: str | None, excludes: Excludes, *, max_file_size: int,
+                 trust_repo: bool = False) -> None:  # fmt: skip
         self.path = path.resolve()
         cwd = self.path if self.path.is_dir() else self.path.parent
-        self.top = Path(_git(cwd, "rev-parse", "--show-toplevel").decode().strip())
+        self.top = Path(_git(cwd, "rev-parse", "--show-toplevel").decode().strip()).resolve()
+        if not trust_repo:
+            risky = _risky_config_keys(self.top)
+            if risky:
+                raise GitError(
+                    f"the repository's git config sets {', '.join(risky[:5])}, which could run commands during "
+                    "the diff. Review .git/config and rerun with --trust-repo"
+                )
         self.base = resolve_base(self.top, base)
         self.excludes = excludes
         self.max_file_size = max_file_size
@@ -95,23 +136,28 @@ class GitChangedSource:
             if self.path != self.top and self.path not in full.parents and full != self.path:
                 continue
             name = full.name
-            if any(part in self.excludes.dir_names for part in Path(rel).parts[:-1]):
+            if any(part.lower() in self.excludes.dir_names for part in Path(rel).parts[:-1]):
                 continue
             reason = self.excludes.file_excluded(name, rel)
             try:
                 st = full.lstat()
             except FileNotFoundError:
                 continue
+            if stat.S_ISLNK(st.st_mode):
+                reason = "symlink"
+            elif not stat.S_ISREG(st.st_mode):  # submodules, nested repositories, special files
+                reason = "not a regular file"
+            changed = max(st.st_mtime_ns, st.st_ctime_ns)
             if reason:
-                yield FileRef(str(full), rel, st.st_size, st.st_mtime_ns, excluded=reason, source="git")
+                yield FileRef(str(full), rel, st.st_size, changed, excluded=reason, source="git")
             elif st.st_size > self.max_file_size:
-                yield FileRef(str(full), rel, st.st_size, st.st_mtime_ns,
+                yield FileRef(str(full), rel, st.st_size, changed,
                               error=f"too_large: {st.st_size} bytes", source="git")  # fmt: skip
             else:
-                yield FileRef(str(full), rel, st.st_size, st.st_mtime_ns, source="git")
+                yield FileRef(str(full), rel, st.st_size, changed, source="git", root=str(self.top))
 
     def read(self, ref: FileRef, max_bytes: int) -> bytes:
-        return read_regular_file(ref.path, max_bytes)
+        return read_regular_file(ref.path, max_bytes, root=ref.root)
 
 
 __all__ = ["GitChangedSource", "GitError", "ReadError", "resolve_base"]

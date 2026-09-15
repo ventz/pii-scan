@@ -36,7 +36,9 @@ pii-scan mask --from findings.jsonl --out /secure/masked --style partial
 ```
 
 `pii-scan mask` checks each file's SHA-256 against the report. If a file changed since the scan,
-it is not written and the command exits `3`.
+it is not written and the command exits `3`. It also re-runs the built-in regex rules (and any
+`--custom-regex` rules) on every file, so a report with deleted finding lines can't leave those
+values unmasked. Findings that a baseline suppressed are in the report and are masked too.
 
 ## Styles
 
@@ -48,7 +50,7 @@ Using `SSN 123-45-6789` as the input:
 | `generic` | `SSN [REDACTED]` | The type itself is sensitive |
 | `stars` | `SSN ***********` | Fixed-width formats; length and line numbers must not change |
 | `partial` | `SSN *******6789` | People need the last four characters to recognize a record |
-| `hash` | `SSN [SSN:3f9a1c0b]` | The same value must map to the same token everywhere (joins, analytics) |
+| `hash` | `SSN [SSN:3f9a1c0b27d4]` | The same value must map to the same token everywhere (joins, analytics) |
 
 `stars` and `partial` keep line breaks inside masked values, so line numbers in the copy match the
 original.
@@ -65,7 +67,8 @@ pii-scan --all --mask-out /secure/masked --mask-style hash /mnt/share
 ```
 
 Anyone with the key can test whether a guessed value produced a token, so protect it like a
-password. Tokens are 8 hex characters; treat them as pseudonyms, not unique identifiers.
+password; it must be at least 16 bytes. Tokens are 12 hex characters (48 bits), so collisions are
+rare but possible across very large estates: treat them as pseudonyms, not unique identifiers.
 
 ## Guarantees
 
@@ -76,8 +79,10 @@ password. Tokens are 8 hex characters; treat them as pseudonyms, not unique iden
   combined into one region, labeled with the most severe type, before any replacement.
 - **Verification.** After masking, pii-scan checks that no masked value of six or more
   characters is still present in the file. If one is, the file is not written.
-- **Byte-exact everywhere else.** Encoding (UTF-8, UTF-8 with BOM, UTF-16, UTF-32, Windows-1252),
-  line endings, and undecodable bytes are preserved outside the masked regions.
+- **Byte-exact everywhere else.** Encoding (UTF-8 with or without BOM, UTF-16 and UTF-32 with or
+  without BOM, Windows-1252) and line endings are preserved outside the masked regions.
+  Undecodable bytes in UTF-8 and Windows-1252 files survive unchanged; invalid sequences in UTF-16
+  and UTF-32 files are replaced.
 - **Safe writes.** The output directory must not overlap the scanned paths. Files are written
   atomically through a temporary file, with mode `0600`, and never through a symlink.
 

@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
-"""Compatibility entry point: `./pii_scan [options]` runs the installed `pii-scan` command.
+"""Compatibility entry point: `./pii_scan [options]` runs pii-scan from this checkout's `src/`.
 
-Prefer `uv run pii-scan ...` or `uvx --from git+https://github.com/ventz/pii-scan pii-scan ...`.
+Dependencies (boto3) must be installed in the Python running this script; `uv run pii-scan ...`
+handles that for you.
 """
 
 import sys
 from pathlib import Path
+
+if sys.version_info < (3, 11):
+    sys.stderr.write("error: pii-scan requires Python 3.11 or newer. Fix: run 'uv run pii-scan' instead.\n")
+    raise SystemExit(2)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 

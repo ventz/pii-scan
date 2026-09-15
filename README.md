@@ -45,8 +45,8 @@ It started as a free, open-source alternative to commercial DLP scanners.
 
 ```bash
 uv tool install git+https://github.com/ventz/pii-scan
+curl -sO https://raw.githubusercontent.com/ventz/pii-scan/main/sample_testing_data.txt
 pii-scan --all sample_testing_data.txt
-pii-scan --help
 ```
 
 Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/). For pip, running from a checkout,
@@ -150,7 +150,7 @@ pii-scan --all --mask-out /secure/masked --mask-style partial /mnt/share
 ```
 
 `SSN 123-45-6789` becomes `SSN [SSN]` (`label`), `SSN *******6789` (`partial`), or
-`SSN [SSN:3f9a1c0b]` (`hash`). Only fully analyzed files are written, originals are never
+`SSN [SSN:3f9a1c0b27d4]` (`hash`). Only fully analyzed files are written, originals are never
 modified, and each masked file is checked for leftover values. See [Masking](docs/masking.md).
 
 ## GitHub Action

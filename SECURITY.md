@@ -15,8 +15,8 @@ around; a violation of any of them is a security bug.
 
 - **Values stay out of output.** Console output, reports (text, JSON, JSONL, CSV, SARIF),
   GitHub annotations, the job summary, the cache, and baselines contain typed placeholders and
-  keyed fingerprints, never matched values. `--show-values` is the only exception and is refused
-  when `CI` is set.
+  keyed fingerprints, never matched values. `--show-values` is the only exception; it is refused
+  in CI and never uses the cache.
 - **Fail closed.** A file that was not fully analyzed is never reported clean and never written
   to a masked output tree.
 - **Reports are private.** Files written with `--report` and masked copies are created with mode
@@ -24,10 +24,18 @@ around; a violation of any of them is a security bug.
 - **Masking is non-destructive.** Masked copies go to a separate directory that must not overlap
   the scanned tree. Writes are atomic and never follow a symlink. Originals are never modified.
 - **Untrusted files are handled defensively.** Symlinks, FIFOs, sockets, and devices are skipped
-  without being opened; reads are bounded by `max_file_size`. Built-in regex rules are written to
-  run in linear time, and matches per rule are capped.
-- **Git is invoked defensively.** `core.fsmonitor`, hooks, and external diff drivers are
-  disabled, and git runs only in changed-files mode.
+  without being opened; reads are bounded by `max_file_size`, and each opened file is verified to
+  still be under the scan root (so a parent directory swapped for a symlink mid-scan is refused).
+  Built-in regex rules avoid catastrophic backtracking. A file where one rule exceeds the match cap
+  is reported as not scanned rather than partially reported or masked.
+- **Git is invoked defensively.** `core.fsmonitor`, hooks, and external diff drivers are disabled,
+  git runs only in changed-files mode, and repositories whose own `.git/config` sets filters,
+  includes, or diff commands are refused unless `--trust-repo` is given.
+- **Untrusted configuration can't loosen policy.** With `--restricted-config` (always on in the
+  GitHub Action), a configuration or custom rules file from the scanned tree can only add rules or
+  raise severities.
+- **Spending is bounded on request.** `--aws-max-chars` stops the run once a character budget has
+  been sent to AWS.
 - **AWS endpoints are pinned.** `AWS_ENDPOINT_URL*` environment variables are ignored unless an
   endpoint is set explicitly in configuration, so a planted environment cannot redirect scanned
   content. Credentials come from the standard AWS credential chain; pii-scan never stores them.

@@ -63,7 +63,7 @@ Add your own with [custom rules](configuration.md#custom-regex-rules).
 | Returns | Entity types and scores, no locations | Matched text and type, no scores | Exact character spans and scores |
 | Price | $0.000002 per 100 characters | Sensitive information filter, per 1,000 text units (1 unit = 1,000 characters) | $0.0001 per 100 characters |
 | Minimum charge | 300 characters per request | per text unit | 300 characters per request |
-| Request size used | 90 KB | 20,000 characters | 90 KB |
+| Request size used | 90 KB | 20 KB | 90 KB |
 | Default quota | 25 requests/s | About 25 text units/s (check Service Quotas) | 200/s us-east-1, 100/s us-west-2, 50/s elsewhere |
 | pii-scan default rate | `--max-tps-contains 20` | `guardrail_chars_per_second 20000` | `--max-tps-detect 40` |
 | Languages | Several; set `--language` | Per guardrail | English and Spanish |

@@ -10,6 +10,7 @@ from pathlib import Path
 
 from ..entities import CUSTOM_RULE_SEVERITY, KNOWN_TYPES
 from ..models import Severity, Span
+from .base import DetectorError
 
 Validator = Callable[[str], bool]
 
@@ -63,7 +64,8 @@ BUILTIN_RULES: tuple[Rule, ...] = (
        r"(?i)aws[_ ]?secret[_ ]?(?:access[_ ]?)?key[\"']?[ \t]*[:=][ \t]*[\"']?([A-Za-z0-9/+=]{40})(?![A-Za-z0-9/+=])",
        group=1, triggers=("secret",), ci=True),
     _r("private-key-block", "PRIVATE_KEY",
-       r"-----BEGIN (?:[A-Z0-9]+ ){0,3}PRIVATE KEY-----[A-Za-z0-9+/=\s:,-]{0,16384}?"
+       # the body may not contain another BEGIN, so repeated headers can't make each attempt scan 16 KB
+       r"-----BEGIN (?:[A-Z0-9]+ ){0,3}PRIVATE KEY-----(?:(?!-----BEGIN )[\s\S]){0,16384}?"
        r"-----END (?:[A-Z0-9]+ ){0,3}PRIVATE KEY-----", triggers=("PRIVATE KEY-----",)),
     _r("private-key-header", "PRIVATE_KEY", r"-----BEGIN (?:[A-Z0-9]+ ){0,3}PRIVATE KEY-----",
        triggers=("PRIVATE KEY-----",)),
@@ -72,7 +74,8 @@ BUILTIN_RULES: tuple[Rule, ...] = (
     _r("slack-token", "SLACK_TOKEN", r"\bxox[abposr]-[A-Za-z0-9-]{10,250}\b", triggers=("xox",)),
     _r("stripe-live-key", "STRIPE_KEY", r"\b[rs]k_live_[A-Za-z0-9]{20,247}\b", triggers=("k_live_",)),
     _r("google-api-key", "GOOGLE_API_KEY", r"\bAIza[0-9A-Za-z_-]{35}\b", triggers=("AIza",)),
-    _r("jwt", "JWT", r"\beyJ[A-Za-z0-9_-]{8,4096}\.eyJ[A-Za-z0-9_-]{8,8192}\.[A-Za-z0-9_-]{8,4096}",
+    # lookbehind allows one start per run of token characters (no quadratic retries on "eyJeyJ...")
+    _r("jwt", "JWT", r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,4096}\.eyJ[A-Za-z0-9_-]{8,8192}\.[A-Za-z0-9_-]{8,4096}",
        triggers=("eyJ",)),
     _r("bearer-token", "BEARER_TOKEN", r"(?i)\bbearer[ \t]+([A-Za-z0-9._~+/-]{20,4096}=*)", group=1,
        triggers=("bearer",), ci=True),
@@ -181,11 +184,9 @@ class RegexDetector:
                     continue
                 if rule.validator and not rule.validator(text[start:end]):
                     continue
-                out.append(Span(start, end, rule.type, rule.score, self.name, rule.id))
                 count += 1
-                if count >= self.max_matches:
-                    break
+                if count > self.max_matches:
+                    # Never return a truncated result: unreported matches would also stay unmasked.
+                    raise DetectorError(f"match_limit: rule {rule.id} matched more than {self.max_matches} times")
+                out.append(Span(start, end, rule.type, rule.score, self.name, rule.id))
         return out
-
-    def severity_overrides(self) -> dict[str, Severity]:
-        return {r.type: r.severity for r in self.rules if r.severity is not None}

@@ -9,8 +9,8 @@ from pathlib import Path
 from typing import IO, TYPE_CHECKING
 
 from . import __version__
-from .models import FileResult, Severity, Status
-from .state import finding_to_dict
+from .models import FileResult, Finding, Severity, Status
+from .state import finding_to_dict, json_safe, report_path
 
 if TYPE_CHECKING:
     from .pipeline import Summary
@@ -27,6 +27,14 @@ def clean(text: str) -> str:
 
 def display_path(r: FileResult) -> str:
     return clean(r.relpath or r.path)
+
+
+def _finding_record(r: FileResult, f: Finding, *, suppressed: bool = False) -> dict:
+    rec = {"kind": "finding", "schema": 1, "relpath": json_safe(r.relpath), **finding_to_dict(f)}
+    rec["path"] = json_safe(f.path)
+    if suppressed:
+        rec["suppressed"] = True
+    return rec
 
 
 class MultiSink:
@@ -61,7 +69,11 @@ class TextSink:
 
 
 class JsonlSink:
-    """Canonical stream: one `file` record per analyzed file, `finding` records, then `summary`."""
+    """Canonical stream: one `file` record per analyzed file, `finding` records, then `summary`.
+
+    Findings suppressed by a baseline are included with `"suppressed": true`, so masking from the
+    report still removes them.
+    """
 
     def __init__(self, stream: IO[str]) -> None:
         self.stream = stream
@@ -73,12 +85,15 @@ class JsonlSink:
         if r.status is Status.EXCLUDED:
             return
         self._write({
-            "kind": "file", "schema": 1, "path": r.path, "relpath": r.relpath, "status": r.status.value,
-            "reason": r.reason, "size": r.size, "encoding": r.encoding, "sha256": r.sha256,
-            "findings": len(r.findings), "suppressed": r.suppressed, "masked_path": r.masked_path,
+            "kind": "file", "schema": 1, "path": json_safe(r.path), "relpath": json_safe(r.relpath),
+            "status": r.status.value, "reason": json_safe(r.reason), "size": r.size, "encoding": r.encoding,
+            "sha256": r.sha256, "findings": len(r.findings), "suppressed": r.suppressed,
+            "masked_path": json_safe(r.masked_path),
         })  # fmt: skip
         for f in r.findings:
-            self._write({"kind": "finding", "schema": 1, "relpath": r.relpath, **finding_to_dict(f)})
+            self._write(_finding_record(r, f))
+        for f in r.suppressed_findings:
+            self._write(_finding_record(r, f, suppressed=True))
 
     def close(self, summary: Summary) -> None:
         self._write({"kind": "summary", "schema": 1, "version": __version__, **summary.to_dict()})
@@ -95,8 +110,8 @@ class JsonSink:
     def file(self, r: FileResult) -> None:
         if r.status in (Status.FINDINGS, Status.NOT_SCANNED):
             self.files.append({
-                "path": r.path, "relpath": r.relpath, "status": r.status.value, "reason": r.reason,
-                "findings": [finding_to_dict(f) for f in r.findings],
+                "path": json_safe(r.path), "relpath": json_safe(r.relpath), "status": r.status.value,
+                "reason": json_safe(r.reason), "findings": [_finding_record(r, f) for f in r.findings],
             })  # fmt: skip
 
     def close(self, summary: Summary) -> None:
@@ -116,7 +131,7 @@ class CsvSink:
 
     def file(self, r: FileResult) -> None:
         for f in r.findings:
-            self.writer.writerow([_cell(r.relpath or r.path), f.line, f.column, str(f.severity), f.type,
+            self.writer.writerow([_cell(json_safe(r.relpath or r.path)), f.line, f.column, str(f.severity), f.type,
                                   f.detector, f"{f.score:.2f}", _cell(f.rule), _cell(f.preview),
                                   f.fingerprint])  # fmt: skip
 
@@ -130,13 +145,18 @@ def _cell(value: str) -> str:
 
 
 class SarifSink:
-    """SARIF 2.1.0 for GitHub code scanning (results capped at the 25,000 upload limit)."""
+    """SARIF 2.1.0 for GitHub code scanning (results capped at the 25,000 upload limit).
+
+    Locations are relative to the working directory (the workspace in CI). Partial fingerprints are
+    emitted only when fingerprints are stable across runs (PII_SCAN_HMAC_KEY is set).
+    """
 
     LEVEL = {Severity.CRITICAL: "error", Severity.HIGH: "error", Severity.MEDIUM: "warning", Severity.LOW: "note"}
     SECURITY_SEVERITY = {Severity.CRITICAL: "9.5", Severity.HIGH: "8.0", Severity.MEDIUM: "5.0", Severity.LOW: "2.0"}
 
-    def __init__(self, stream: IO[str]) -> None:
+    def __init__(self, stream: IO[str], *, stable_fingerprints: bool = False) -> None:
         self.stream = stream
+        self.stable = stable_fingerprints
         self.results: list[dict] = []
         self.rules: dict[str, dict] = {}
         self.dropped = 0
@@ -152,17 +172,19 @@ class SarifSink:
                 "shortDescription": {"text": f"Sensitive data: {f.type}"},
                 "properties": {"security-severity": self.SECURITY_SEVERITY[f.severity], "tags": ["security", "pii"]},
             })  # fmt: skip
-            self.results.append({
+            result = {
                 "ruleId": rule_id,
                 "level": self.LEVEL[f.severity],
                 "message": {"text": f"{f.type} detected by {f.detector} ({f.score:.2f}): {f.preview}"},
                 "locations": [{"physicalLocation": {
-                    "artifactLocation": {"uri": (r.relpath or r.path).replace(os.sep, "/")},
+                    "artifactLocation": {"uri": report_path(f.path)},
                     "region": {"startLine": f.line, "startColumn": f.column,
                                "endLine": f.end_line, "endColumn": f.end_column},
                 }}],
-                "partialFingerprints": {"piiScan/v1": f.fingerprint},
-            })  # fmt: skip
+            }  # fmt: skip
+            if self.stable:
+                result["partialFingerprints"] = {"piiScan/v1": f.fingerprint}
+            self.results.append(result)
 
     def close(self, summary: Summary) -> None:
         doc = {
@@ -198,7 +220,7 @@ class GithubSink:
             self.count += 1
             blocking = self.fail_on is not None and f.severity >= self.fail_on
             kind = "error" if blocking else "warning"
-            props = (f"file={_prop(r.relpath or r.path)},line={f.line},col={f.column},"
+            props = (f"file={_prop(report_path(f.path))},line={f.line},col={f.column},"
                      f"endColumn={f.end_column},title={_prop(f'{str(f.severity).upper()} {f.type}')}")  # fmt: skip
             self.stream.write(f"::{kind} {props}::{_data(f'{f.type} detected by {f.detector}: {f.preview}')}\n")
 

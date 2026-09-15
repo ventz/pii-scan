@@ -35,6 +35,7 @@ _DONE = object()
 _MAX_CONSECUTIVE_REMOTE_ERRORS = 25
 _UNDECODABLE_RATIO = 0.01
 _SURROGATE = re.compile("[\udc80-\udcff]")
+_ESCAPABLE_ENCODINGS = ("utf-8", "cp1252")
 
 
 class Sink(Protocol):
@@ -135,6 +136,7 @@ class Scanner:
         self._err_lock = threading.Lock()
         self._consecutive_remote_errors = 0
         self._fatal = ""
+        self._enumerated = 0
 
     # --- orchestration -----------------------------------------------------------------------
 
@@ -150,6 +152,7 @@ class Scanner:
                 for ref in self.source:
                     if self.stop.is_set():
                         break
+                    self._enumerated += 1  # only this thread writes it
                     direct = self._triage(ref)
                     if direct is not None:
                         self._put(result_q, direct)
@@ -169,7 +172,7 @@ class Scanner:
                         return
                     if self.stop.is_set():
                         continue  # drain
-                    self._put(result_q, self._process(ref, api_pool))
+                    self._put(result_q, self._process_safe(ref, api_pool))
             finally:
                 result_q.put(_DONE)
 
@@ -213,12 +216,16 @@ class Scanner:
                 api_pool.shutdown(wait=False, cancel_futures=True)
 
         summary.aborted = self._fatal
+        if not summary.aborted and not summary.interrupted and summary.files_total != self._enumerated:
+            missing = self._enumerated - summary.files_total
+            summary.aborted = f"internal error: {missing} enumerated files have no recorded result"
         summary.elapsed = time.monotonic() - summary.started
         if self.aws is not None:
             summary.aws_usage = {
                 "account_region": self.aws.region,
                 "calls": dict(self.aws.usage.calls),
                 "units": dict(self.aws.usage.units),
+                "characters_sent": self.aws.usage.chars,
                 "estimated_cost_usd": round(self.aws.usage.estimated_cost(), 4),
             }
         if self.cache is not None:
@@ -276,13 +283,22 @@ class Scanner:
             summary.by_type[f.type] += 1
             if self.s.fail_on is not None and f.severity >= self.s.fail_on:
                 summary.blocking += 1
-            if self.s.write_baseline is not None:
-                self.baseline_keys.add(Baseline.key(f, r.relpath))
+        if self.s.write_baseline is not None:
+            for f in (*r.findings, *r.suppressed_findings):
+                self.baseline_keys.add(Baseline.key(f))
         if self.cache is not None and not r.cached and self.s.mask_out is None:
             self.cache.put(getattr(self.source, "name", "fs"), r, r.mtime_ns)
         self.sink.file(r)
 
     # --- per file ----------------------------------------------------------------------------
+
+    def _process_safe(self, ref: FileRef, api_pool: ThreadPoolExecutor | None) -> FileResult:
+        """Every file gets a result: an unexpected error anywhere marks it not scanned."""
+        try:
+            return self._process(ref, api_pool)
+        except Exception as exc:  # noqa: BLE001
+            return FileResult(ref.path, Status.NOT_SCANNED, f"internal_error: {type(exc).__name__}",
+                              size=max(ref.size, 0), relpath=ref.relpath)  # fmt: skip
 
     def _process(self, ref: FileRef, api_pool: ThreadPoolExecutor | None) -> FileResult:
         result = FileResult(ref.path, Status.NOT_SCANNED, size=max(ref.size, 0), relpath=ref.relpath,
@@ -291,9 +307,6 @@ class Scanner:
             data = self.source.read(ref, self.s.max_file_size)
         except ReadError as exc:
             result.reason = exc.reason
-            return result
-        except Exception as exc:  # noqa: BLE001
-            result.reason = f"read_failed: {type(exc).__name__}"
             return result
 
         result.size = len(data)
@@ -307,13 +320,17 @@ class Scanner:
             return result
         result.encoding = encoding
         text = decode(data, encoding)
-        if (text and encoding == "utf-8" and not text.isascii()
+        if (text and encoding in _ESCAPABLE_ENCODINGS and not text.isascii()
                 and sum(1 for _ in _SURROGATE.finditer(text)) / len(text) > _UNDECODABLE_RATIO):  # fmt: skip
             result.reason = "undecodable"
             return result
 
         try:
             spans = self.regex.detect(text)
+        except DetectorError as exc:  # e.g. match_limit: never report or mask a partial result
+            result.reason = _reason(str(exc))
+            return result
+        try:
             if self.layers and text.strip():
                 remote = detect_remote(text, self.layers, api_pool)
                 self._remote_ok()
@@ -325,9 +342,6 @@ class Scanner:
                 self._remote_failed(str(exc))
             result.reason = _reason(str(exc))
             return result
-        except Exception as exc:  # noqa: BLE001 - isolate unexpected failures per file
-            result.reason = f"internal_error: {type(exc).__name__}"
-            return result
 
         spans = dedupe(spans)
         result.findings = self._findings(ref, text, spans)
@@ -336,7 +350,7 @@ class Scanner:
             try:
                 self._write_masked(result, ref, data, text, encoding, spans)
             except Exception as exc:  # noqa: BLE001 - a failed masked write must be visible
-                result.status, result.reason = Status.NOT_SCANNED, f"mask_failed: {exc}"
+                result.status, result.reason = Status.NOT_SCANNED, f"mask_failed: {type(exc).__name__}"
                 result.findings = []
                 return result
         return self._apply_baseline(result)
@@ -372,9 +386,10 @@ class Scanner:
     def _apply_baseline(self, r: FileResult) -> FileResult:
         if self.baseline is None or not r.findings:
             return r
-        kept = [f for f in r.findings if Baseline.key(f, r.relpath) not in self.baseline]
-        r.suppressed = len(r.findings) - len(kept)
-        r.findings = kept
+        kept, suppressed = [], []
+        for f in r.findings:
+            (suppressed if Baseline.key(f) in self.baseline else kept).append(f)
+        r.findings, r.suppressed_findings, r.suppressed = kept, suppressed, len(suppressed)
         if r.status is Status.FINDINGS and not kept:
             r.status = Status.CLEAN
         return r

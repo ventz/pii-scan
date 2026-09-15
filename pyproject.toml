@@ -40,6 +40,10 @@ dev = [
 requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
+[tool.uv]
+# Pin the build backend: the GitHub Action builds this project inside jobs that may hold credentials.
+build-constraint-dependencies = ["hatchling==1.32.0"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/pii_scan"]
 

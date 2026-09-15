@@ -17,6 +17,7 @@ class FileRef:
     error: str = ""
     source: str = "fs"  # "fs" | "git" | later "graph"
     etag: str = ""  # change token for remote sources (Graph cTag/eTag)
+    root: str = ""  # real path the file must stay under when read (guards parent-directory symlink swaps)
 
 
 class ReadError(Exception):

@@ -66,6 +66,25 @@ A rewrite focused on correctness, scale, and a new masking feature.
 - The GitHub Action: inputs are passed through the environment (no `eval`), actions are pinned by
   commit SHA, the script path is correct, and credentials come from the caller's job.
 
+### Security
+
+- `--restricted-config` (always used by the GitHub Action): configuration and custom rules files
+  from the scanned tree may only add rules or raise severities.
+- Changed-files mode refuses repositories whose own `.git/config` sets filters, includes,
+  fsmonitor, or diff commands, unless `--trust-repo` is given.
+- Reads verify that the opened file is still under the scan root.
+- `--aws-max-chars` sets a cost ceiling for AWS layers.
+- A file where one rule exceeds `max_matches_per_rule` (default 10,000) is reported as not scanned,
+  never partially masked.
+- `pii-scan mask --from` refuses output directories that overlap the scanned files, masks findings
+  suppressed by a baseline, and re-runs regex rules so a tampered report can't leave values unmasked.
+- The resume cache stores findings from before the baseline, is skipped with `--show-values`, keys
+  on change time, and is created with owner-only permissions. Reports refuse symlinks.
+- The `jwt` and `private-key-block` patterns no longer backtrack on adversarial input.
+- The GitHub Action pins its uv version and build backend, installs without dev dependencies,
+  writes the report outside the workspace, and uploads SARIF only for complete scans.
+- `PII_SCAN_HMAC_KEY` must be at least 16 bytes; `hash` masks use 12 hex characters.
+
 ### Removed
 
 - The unused `batch_size`, `max_retries`, `retry_delay`, `text_check_blocksize`, and

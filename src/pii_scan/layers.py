@@ -12,7 +12,6 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from concurrent.futures import Executor
-from dataclasses import dataclass
 
 from .chunking import api_safe, chunks
 from .detectors.aws import ComprehendDetector, ContainsScreen, GuardrailsDetector
@@ -21,11 +20,6 @@ from .models import Span
 OVERLAP_CHARS = 1024
 
 Layer = ContainsScreen | GuardrailsDetector | ComprehendDetector
-
-
-@dataclass(slots=True)
-class LayerStats:
-    chunks_screened_out: int = 0
 
 
 def _shift(spans: list[Span], offset: int) -> list[Span]:

@@ -44,7 +44,7 @@ That line reads: file, line 12, column 6, severity `CRITICAL`, entity type `SSN`
 The summary goes to stderr:
 
 ```text
-FAILED: 10 findings at or above high severity.
+FAILED: 11 findings at or above high severity.
 Files: 1 scanned (0 from cache), 1 with findings, 0 not scanned, 0 skipped.
 ```
 

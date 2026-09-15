@@ -45,6 +45,8 @@ class Settings:
     paths: tuple[str, ...] = (".",)
     scan_all: bool = False
     base: str | None = None
+    trust_repo: bool = False
+    restricted_config: bool = False
     same_filesystem: bool = False
     binary_policy: str = "skip"  # skip | fail
     # detection
@@ -55,7 +57,7 @@ class Settings:
     severity: dict[str, Severity] = field(default_factory=lambda: dict(DEFAULT_SEVERITY))
     validation_patterns: dict[str, str] = field(default_factory=dict)
     custom_rules: Path | None = None
-    max_matches_per_rule: int = 500
+    max_matches_per_rule: int = 10_000
     aws: AwsSettings = field(default_factory=AwsSettings)
     # policy
     fail_on: Severity | None = Severity.HIGH  # None = never fail on findings
@@ -109,14 +111,20 @@ class Settings:
             raise ConfigError("workers must be at least 1")
         if self.max_file_size < 1:
             raise ConfigError("max_file_size must be positive")
+        if self.max_matches_per_rule < 1:
+            raise ConfigError("max_matches_per_rule must be at least 1")
+        if min(self.aws.tps_contains, self.aws.tps_detect, self.aws.guardrail_chars_per_second) <= 0:
+            raise ConfigError("AWS rate limits (tps_contains, tps_detect, guardrail_chars_per_second) must be positive")
         if self.output not in {"text", "json", "jsonl", "csv", "sarif"}:
             raise ConfigError(f"unknown output format {self.output!r}")
         if self.progress not in {"auto", "lines", "none"}:
             raise ConfigError(f"unknown progress mode {self.progress!r}")
         if self.binary_policy not in {"skip", "fail"}:
             raise ConfigError("binary policy must be 'skip' or 'fail'")
-        if self.show_values and _truthy(os.environ.get("CI")):
-            raise ConfigError("--show-values is refused when CI is set (values would land in build logs)")
+        if self.show_values and in_ci():
+            raise ConfigError("--show-values is refused in CI (values would land in build logs)")
+        if self.aws.max_chars is not None and self.aws.max_chars < 1:
+            raise ConfigError("--aws-max-chars must be positive")
         try:
             validate_type_names(self.entity_types)
         except ValueError as exc:
@@ -132,6 +140,14 @@ class Settings:
 
 def _truthy(value: object) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+_CI_MARKERS = ("GITHUB_ACTIONS", "GITLAB_CI", "JENKINS_URL", "TF_BUILD", "BUILDKITE", "CIRCLECI",
+               "TEAMCITY_VERSION", "BITBUCKET_BUILD_NUMBER", "CODEBUILD_BUILD_ID")  # fmt: skip
+
+
+def in_ci() -> bool:
+    return _truthy(os.environ.get("CI")) or any(os.environ.get(k) for k in _CI_MARKERS)
 
 
 def parse_severity_or_never(value: str) -> Severity | None:
@@ -153,8 +169,25 @@ def _csv(value: Any) -> list[str]:
     raise ConfigError(f"expected a list or comma-separated string, got {type(value).__name__}")
 
 
-def load_config_file(path: Path, base: Settings) -> Settings:
-    """Apply a JSON config file (version 1 schema, or the 1.0 flat keys) on top of `base`."""
+def load_config_file(path: Path, base: Settings, *, restricted: bool = False) -> Settings:
+    """Apply a JSON config file (version 1 schema, or the 1.0 flat keys) on top of `base`.
+
+    Any invalid value (wrong type, unknown enum value) becomes a ConfigError, which exits 2.
+    With `restricted`, the file is treated as untrusted (for example it comes from the pull request
+    being scanned): it may only add custom rules or raise severities.
+    """
+    try:
+        return _load_config_file(path, base, restricted)
+    except ConfigError:
+        raise
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise ConfigError(f"{path}: invalid value: {exc}") from exc
+
+
+_RESTRICTED_ALLOWED_KEYS = frozenset({"version", "severity", "critical_entity_types", "regex_patterns", "custom_rules"})
+
+
+def _load_config_file(path: Path, base: Settings, restricted: bool) -> Settings:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
@@ -163,6 +196,11 @@ def load_config_file(path: Path, base: Settings) -> Settings:
         raise ConfigError(f"cannot read config file {path}: {exc}") from exc
     if not isinstance(raw, dict):
         raise ConfigError(f"{path}: expected a JSON object")
+    if restricted:
+        blocked = sorted(set(raw) - _RESTRICTED_ALLOWED_KEYS)
+        if blocked:
+            raise ConfigError(f"{path}: with --restricted-config the file may only add rules or raise severities; "
+                              f"not allowed: {', '.join(blocked)}")  # fmt: skip
 
     warnings = list(base.warnings)
     s: dict[str, Any] = {}
@@ -220,6 +258,11 @@ def load_config_file(path: Path, base: Settings) -> Settings:
             sev = Severity.parse(level)
             names_set = set(_csv(names))
             _validate_names(names_set, path, allow_custom=True)
+            if restricted:
+                lowered = sorted(t for t in names_set if sev < severity.get(t, Severity.HIGH))
+                if lowered:
+                    raise ConfigError(f"{path}: with --restricted-config severities can only be raised; "
+                                      f"'{level}' would lower {', '.join(lowered)}")  # fmt: skip
             severity.update({t: sev for t in names_set})
     if (v := take("validation_patterns")) is not None:
         if not isinstance(v, dict):

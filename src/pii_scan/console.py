@@ -39,11 +39,11 @@ class Console:
 
     def warn(self, message: str) -> None:
         self._clear_bar()
-        self.stream.write(f"warning: {message}\n")
+        self.stream.write(f"warning: {clean(message)}\n")
 
     def error(self, message: str) -> None:  # never suppressed by --quiet
         self._clear_bar()
-        self.stream.write(f"error: {message}\n")
+        self.stream.write(f"error: {clean(message)}\n")
 
     def tick(self, s: Summary, final: bool) -> None:
         if self.progress == "none":

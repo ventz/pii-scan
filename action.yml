@@ -36,9 +36,9 @@ inputs:
     required: false
     default: 'sarif'
   report-path:
-    description: 'Where to write the report'
+    description: 'Where to write the report (default: $RUNNER_TEMP/pii-scan-report.<format>, outside the workspace)'
     required: false
-    default: 'pii-scan-report.sarif'
+    default: ''
   upload-sarif:
     description: 'Upload the SARIF report to GitHub code scanning (needs security-events: write)'
     required: false
@@ -97,6 +97,9 @@ runs:
   steps:
     - name: Set up uv
       uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      with:
+        # explicit version: never read a uv version requirement from the repository being scanned
+        version: '0.12.13'
 
     - name: Run pii-scan
       id: scan
@@ -136,8 +139,15 @@ runs:
         [[ -z "$IN_MIN_CONFIDENCE" || "$IN_MIN_CONFIDENCE" =~ ^(0(\.[0-9]+)?|1(\.0+)?)$ ]] || fail "min-confidence must be 0.0-1.0"
         [[ -z "$IN_WORKERS" || "$IN_WORKERS" =~ ^[0-9]+$ ]] || fail "workers must be a number"
 
+        report="$IN_REPORT_PATH"
+        [[ -z "$report" ]] && report="$RUNNER_TEMP/pii-scan-report.$IN_OUTPUT_FORMAT"
+
+        # config-file and custom-regex-file come from the checked-out tree, which a pull request can
+        # edit: --restricted-config lets them only add rules or raise severities. The workspace
+        # .git/config is written by actions/checkout, not by the pull request, so it is trusted.
         args=(scan "$IN_PATHS" --layers "$IN_LAYERS" --fail-on "$IN_FAIL_ON"
-              --output "$IN_OUTPUT_FORMAT" --report "$IN_REPORT_PATH" --github --progress lines)
+              --output "$IN_OUTPUT_FORMAT" --report "$report" --github --progress lines
+              --restricted-config --trust-repo)
 
         if [[ "$IN_SCAN_ALL" == "true" ]]; then
           args+=(--all)
@@ -160,19 +170,20 @@ runs:
         [[ "$IN_VERBOSE" == "true" ]] && args+=(--verbose)
         [[ "$IN_QUIET" == "true" ]] && args+=(--quiet)
 
-        uv run --quiet --locked --project "$GITHUB_ACTION_PATH" pii-scan "${args[@]}"
+        uv run --quiet --locked --no-dev --project "$GITHUB_ACTION_PATH" pii-scan "${args[@]}"
         code=$?
         {
           echo "exit-code=$code"
-          echo "report-path=$IN_REPORT_PATH"
+          echo "report-path=$report"
         } >> "$GITHUB_OUTPUT"
         exit 0
 
     - name: Upload SARIF
-      if: ${{ always() && inputs.upload-sarif == 'true' && inputs.output-format == 'sarif' }}
+      # only complete scans: a partial SARIF could make code scanning close alerts that still exist
+      if: ${{ always() && inputs.upload-sarif == 'true' && inputs.output-format == 'sarif' && (steps.scan.outputs.exit-code == '0' || steps.scan.outputs.exit-code == '1') }}
       uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
       with:
-        sarif_file: ${{ inputs.report-path }}
+        sarif_file: ${{ steps.scan.outputs.report-path }}
         category: pii-scan
 
     - name: Enforce result

@@ -161,6 +161,26 @@ def test_unknown_config_key_rejected(tree: Path, tmp_path: Path):
     assert run("--all", str(tree), "--config", str(cfg)) == 2
 
 
+@pytest.mark.parametrize("argv", [["--help"], ["-h"], ["scan", "--help"]])
+def test_help_shows_scan_options(argv, capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(argv)
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert out.startswith("usage: pii-scan [scan] [options] [PATH ...]")
+    for text in ("--all", "--aws", "--mask-out", "--fail-on", "commands:", "exit codes:"):
+        assert text in out
+
+
+def test_version_and_subcommand_help(capsys):
+    with pytest.raises(SystemExit):
+        main(["--version"])
+    assert "pii-scan 1.1.0" in capsys.readouterr().out
+    with pytest.raises(SystemExit):
+        main(["mask", "--help"])
+    assert "--from" in capsys.readouterr().out
+
+
 def test_aws_flag_sets_layer_preset(tree: Path):
     from pii_scan.cli import build_parser, settings_from_args
 
@@ -181,7 +201,7 @@ def test_not_a_git_repo_without_all(tmp_path: Path, capsys):
 
 
 def test_baseline_roundtrip(tree: Path, tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("PII_SCAN_HMAC_KEY", "test-key")
+    monkeypatch.setenv("PII_SCAN_HMAC_KEY", "0123456789abcdef-test-key")
     base = tmp_path / "baseline.json"
     assert run("--all", str(tree), "--write-baseline", str(base), "-q") == 1
     assert run("--all", str(tree), "--baseline", str(base), "-q") == 0
