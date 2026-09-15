@@ -11,6 +11,7 @@ Guardrails) add context-aware detection only where it is needed.
 
 - [Overview](#overview)
 - [Quick Install](#quick-install)
+- [Examples](#examples)
 - [Features](#features)
 - [Usage](#usage)
 - [Detection Layers](#detection-layers)
@@ -47,6 +48,45 @@ pii-scan --help
 Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/). For pip, running from a checkout,
 and AWS setup, see [Getting Started](docs/getting-started.md).
 
+## Examples
+
+```bash
+# Changed files on this branch, including uncommitted work (regex only, nothing leaves the machine)
+pii-scan
+
+# Everything under a directory, file, or mounted share
+pii-scan --all /mnt/share/finance
+
+# Add AWS detection for names, addresses, and free-text PII
+pii-scan --all --aws --region us-east-1 /mnt/share/finance
+
+# AWS detection through a Bedrock guardrail
+pii-scan --all --layers regex,contains,guardrails --guardrail-id <id> --region us-east-1 /mnt/share
+
+# Write masked copies
+pii-scan --all --mask-out /secure/masked /mnt/share/finance
+
+# Save a report, review it, then mask from it with consistent pseudonyms
+pii-scan --all --output jsonl --report findings.jsonl /mnt/share
+pii-scan mask --from findings.jsonl --out /secure/masked --style hash
+
+# Large scan you can interrupt and resume
+pii-scan --all --workers 48 --cache ~/.cache/pii-scan.db --output jsonl --report findings.jsonl /mnt/share
+
+# CI: fail only on critical findings and write SARIF for code scanning
+pii-scan --fail-on critical --output sarif --report pii-scan.sarif
+
+# Accept current findings, then fail only on new ones (needs PII_SCAN_HMAC_KEY)
+pii-scan --all --write-baseline baseline.json .
+pii-scan --baseline baseline.json
+
+# Add your own patterns
+pii-scan --all --custom-regex custom_regex_patterns.json ./data
+
+# Check AWS credentials and layers before a big run
+pii-scan doctor --layers contains,detect --region us-east-1
+```
+
 ## Features
 
 - **Layered detection**: free local regex with validators, then optional
@@ -65,24 +105,8 @@ and AWS setup, see [Getting Started](docs/getting-started.md).
 
 ## Usage
 
-```bash
-# Files changed on this branch (vs. origin's default branch), including uncommitted work
-pii-scan
-
-# Everything under a directory, regex only (nothing leaves the machine)
-pii-scan --all /mnt/share/finance
-
-# Add AWS detection: cheap screen first, exact detection only on positives
-pii-scan --all --aws --region us-east-1 /mnt/share/finance
-
-# Stream a machine-readable report for a large scan, resumable with a cache
-pii-scan --all --output jsonl --report findings.jsonl --cache ~/.cache/pii-scan.db /mnt/share
-
-# Write masked copies
-pii-scan --all --mask-out /secure/masked /mnt/share/finance
-```
-
-Text output is one line per finding, followed by a summary on stderr:
+See [Examples](#examples) for common scans. Text output is one line per finding, followed by a
+summary on stderr:
 
 ```text
 hr/people.txt:3:6: CRITICAL SSN (regex 1.00): [SSN, 11 chars]
