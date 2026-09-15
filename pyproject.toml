@@ -1,7 +1,55 @@
 [project]
 name = "pii-scan"
-version = "1.0.0"
-requires-python = ">=3.13"
+version = "1.1.0"
+description = "Fast, fail-closed scanner that finds and masks PII and secrets across files, repositories, and file shares using regex validators and AWS Comprehend."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Ventz Petkov", email = "ventz@vpetkov.net" }]
+requires-python = ">=3.11"
 dependencies = [
     "boto3>=1.40.55",
 ]
+keywords = ["pii", "secrets", "redaction", "masking", "aws-comprehend", "dlp"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Environment :: Console",
+    "Topic :: Security",
+]
+
+[project.optional-dependencies]
+re2 = ["google-re2>=1.1"]
+
+[project.scripts]
+pii-scan = "pii_scan.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/ventz/pii-scan"
+Issues = "https://github.com/ventz/pii-scan/issues"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "ruff>=0.12",
+]
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pii_scan"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "SIM"]
+ignore = ["S101", "S603", "S607"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

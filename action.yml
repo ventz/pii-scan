@@ -1,122 +1,189 @@
-name: 'PII Scanner'
-description: 'Scan code for PII and sensitive information using AWS Comprehend'
+name: 'pii-scan'
+description: 'Find PII and secrets in changed files with regex validators and optional AWS Comprehend / Bedrock Guardrails layers'
 author: 'Ventz Petkov'
-
-inputs:
-  scan-all:
-    description: 'Scan all files recursively instead of just changed files'
-    required: false
-    default: 'false'
-  min-confidence:
-    description: 'Minimum confidence score (0.0-1.0) for PII detection'
-    required: false
-    default: '0.85'
-  output-format:
-    description: 'Output format: text, json, or csv'
-    required: false
-    default: 'text'
-  custom-regex-file:
-    description: 'Path to file containing custom regex patterns'
-    required: false
-  exclude-dirs:
-    description: 'Comma-separated list of directories to exclude'
-    required: false
-  exclude-exts:
-    description: 'Comma-separated list of file extensions to exclude'
-    required: false
-  workers:
-    description: 'Number of worker threads'
-    required: false
-    default: '8'
-  verbose:
-    description: 'Enable verbose output'
-    required: false
-    default: 'false'
-  quiet:
-    description: 'Suppress all output except findings and errors'
-    required: false
-    default: 'false'
-  aws-region:
-    description: 'AWS region to use for Comprehend API'
-    required: false
-    default: 'us-east-1'
-  config-file:
-    description: 'Path to configuration file'
-    required: false
-
-runs:
-  using: 'composite'
-  steps:
-    - name: Checkout code
-      uses: actions/checkout@v3
-      with:
-        fetch-depth: 0
-
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.11'
-
-    - name: Install AWS CLI and Boto3
-      shell: bash
-      run: |
-        pip install awscli boto3
-
-    - name: Run PII Scan
-      shell: bash
-      env:
-        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        AWS_DEFAULT_REGION: ${{ inputs.aws-region }}
-      run: |
-        # Build command with inputs
-        CMD="python ${{ github.action_path }}/pii-engine/pii_scan"
-
-        # Add optional arguments based on inputs
-        if [ "${{ inputs.scan-all }}" == "true" ]; then
-          CMD="$CMD --all"
-        fi
-
-        if [ -n "${{ inputs.min-confidence }}" ]; then
-          CMD="$CMD --min-confidence ${{ inputs.min-confidence }}"
-        fi
-
-        if [ -n "${{ inputs.output-format }}" ]; then
-          CMD="$CMD --output ${{ inputs.output-format }}"
-        fi
-
-        if [ -n "${{ inputs.custom-regex-file }}" ]; then
-          CMD="$CMD --custom-regex ${{ inputs.custom-regex-file }}"
-        fi
-
-        if [ -n "${{ inputs.exclude-dirs }}" ]; then
-          CMD="$CMD --exclude-dirs \"${{ inputs.exclude-dirs }}\""
-        fi
-
-        if [ -n "${{ inputs.exclude-exts }}" ]; then
-          CMD="$CMD --exclude-exts \"${{ inputs.exclude-exts }}\""
-        fi
-
-        if [ -n "${{ inputs.workers }}" ]; then
-          CMD="$CMD --workers ${{ inputs.workers }}"
-        fi
-
-        if [ "${{ inputs.verbose }}" == "true" ]; then
-          CMD="$CMD --verbose"
-        fi
-
-        if [ "${{ inputs.quiet }}" == "true" ]; then
-          CMD="$CMD --quiet"
-        fi
-
-        if [ -n "${{ inputs.config-file }}" ]; then
-          CMD="$CMD --config ${{ inputs.config-file }}"
-        fi
-
-        # Execute the command
-        echo "Running: $CMD"
-        eval $CMD
 
 branding:
   icon: 'shield'
   color: 'red'
+
+inputs:
+  paths:
+    description: 'Path to scan, relative to the workspace'
+    required: false
+    default: '.'
+  scan-all:
+    description: 'Scan every file under the path instead of only changed files'
+    required: false
+    default: 'false'
+  base:
+    description: 'Git ref or SHA to diff against. Defaults to the pull request base, or the previous commit on push'
+    required: false
+    default: ''
+  layers:
+    description: 'Comma-separated detection layers: regex, contains, guardrails, detect'
+    required: false
+    default: 'regex'
+  fail-on:
+    description: 'Fail on findings at or above: critical, high, medium, low, any, never'
+    required: false
+    default: 'high'
+  min-confidence:
+    description: 'Minimum score (0.0-1.0) for AWS detections'
+    required: false
+    default: ''
+  output-format:
+    description: 'Report format: sarif, jsonl, json, csv, or text'
+    required: false
+    default: 'sarif'
+  report-path:
+    description: 'Where to write the report'
+    required: false
+    default: 'pii-scan-report.sarif'
+  upload-sarif:
+    description: 'Upload the SARIF report to GitHub code scanning (needs security-events: write)'
+    required: false
+    default: 'false'
+  custom-regex-file:
+    description: 'Path to a custom regex rules file'
+    required: false
+    default: ''
+  config-file:
+    description: 'Path to a configuration file'
+    required: false
+    default: ''
+  exclude-dirs:
+    description: 'Comma-separated directory names to skip'
+    required: false
+    default: ''
+  exclude-exts:
+    description: 'Comma-separated file suffixes to skip'
+    required: false
+    default: ''
+  workers:
+    description: 'File worker threads'
+    required: false
+    default: ''
+  aws-region:
+    description: 'AWS region for AWS layers'
+    required: false
+    default: ''
+  guardrail-id:
+    description: 'Bedrock guardrail ID or ARN (guardrails layer)'
+    required: false
+    default: ''
+  allow-incomplete:
+    description: 'Do not fail when some files could not be scanned'
+    required: false
+    default: 'false'
+  verbose:
+    description: 'Verbose output'
+    required: false
+    default: 'false'
+  quiet:
+    description: 'Only findings and errors'
+    required: false
+    default: 'false'
+
+outputs:
+  exit-code:
+    description: '0 passed, 1 findings, 2 configuration error, 3 incomplete'
+    value: ${{ steps.scan.outputs.exit-code }}
+  report-path:
+    description: 'Path of the report file'
+    value: ${{ steps.scan.outputs.report-path }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up uv
+      uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+
+    - name: Run pii-scan
+      id: scan
+      shell: bash
+      env:
+        IN_PATHS: ${{ inputs.paths }}
+        IN_SCAN_ALL: ${{ inputs.scan-all }}
+        IN_BASE: ${{ inputs.base }}
+        IN_LAYERS: ${{ inputs.layers }}
+        IN_FAIL_ON: ${{ inputs.fail-on }}
+        IN_MIN_CONFIDENCE: ${{ inputs.min-confidence }}
+        IN_OUTPUT_FORMAT: ${{ inputs.output-format }}
+        IN_REPORT_PATH: ${{ inputs.report-path }}
+        IN_CUSTOM_REGEX: ${{ inputs.custom-regex-file }}
+        IN_CONFIG: ${{ inputs.config-file }}
+        IN_EXCLUDE_DIRS: ${{ inputs.exclude-dirs }}
+        IN_EXCLUDE_EXTS: ${{ inputs.exclude-exts }}
+        IN_WORKERS: ${{ inputs.workers }}
+        IN_REGION: ${{ inputs.aws-region }}
+        IN_GUARDRAIL_ID: ${{ inputs.guardrail-id }}
+        IN_ALLOW_INCOMPLETE: ${{ inputs.allow-incomplete }}
+        IN_VERBOSE: ${{ inputs.verbose }}
+        IN_QUIET: ${{ inputs.quiet }}
+        EVENT_PR_BASE: ${{ github.event.pull_request.base.sha }}
+        EVENT_BEFORE: ${{ github.event.before }}
+      run: |
+        set -uo pipefail
+
+        fail() { echo "::error title=pii-scan::$1"; exit 2; }
+        is_bool() { [[ "$1" == "true" || "$1" == "false" ]] || fail "$2 must be true or false"; }
+
+        is_bool "$IN_SCAN_ALL" scan-all
+        is_bool "$IN_ALLOW_INCOMPLETE" allow-incomplete
+        is_bool "$IN_VERBOSE" verbose
+        is_bool "$IN_QUIET" quiet
+        [[ "$IN_OUTPUT_FORMAT" =~ ^(sarif|jsonl|json|csv|text)$ ]] || fail "output-format is invalid"
+        [[ -z "$IN_MIN_CONFIDENCE" || "$IN_MIN_CONFIDENCE" =~ ^(0(\.[0-9]+)?|1(\.0+)?)$ ]] || fail "min-confidence must be 0.0-1.0"
+        [[ -z "$IN_WORKERS" || "$IN_WORKERS" =~ ^[0-9]+$ ]] || fail "workers must be a number"
+
+        args=(scan "$IN_PATHS" --layers "$IN_LAYERS" --fail-on "$IN_FAIL_ON"
+              --output "$IN_OUTPUT_FORMAT" --report "$IN_REPORT_PATH" --github --progress lines)
+
+        if [[ "$IN_SCAN_ALL" == "true" ]]; then
+          args+=(--all)
+        else
+          base="$IN_BASE"
+          [[ -z "$base" ]] && base="$EVENT_PR_BASE"
+          [[ -z "$base" && -n "$EVENT_BEFORE" && ! "$EVENT_BEFORE" =~ ^0+$ ]] && base="$EVENT_BEFORE"
+          [[ -n "$base" ]] && args+=(--base "$base")
+        fi
+
+        [[ -n "$IN_MIN_CONFIDENCE" ]] && args+=(--min-confidence "$IN_MIN_CONFIDENCE")
+        [[ -n "$IN_CUSTOM_REGEX" ]] && args+=(--custom-regex "$IN_CUSTOM_REGEX")
+        [[ -n "$IN_CONFIG" ]] && args+=(--config "$IN_CONFIG")
+        [[ -n "$IN_EXCLUDE_DIRS" ]] && args+=(--exclude-dirs "$IN_EXCLUDE_DIRS")
+        [[ -n "$IN_EXCLUDE_EXTS" ]] && args+=(--exclude-exts "$IN_EXCLUDE_EXTS")
+        [[ -n "$IN_WORKERS" ]] && args+=(--workers "$IN_WORKERS")
+        [[ -n "$IN_REGION" ]] && args+=(--region "$IN_REGION")
+        [[ -n "$IN_GUARDRAIL_ID" ]] && args+=(--guardrail-id "$IN_GUARDRAIL_ID")
+        [[ "$IN_ALLOW_INCOMPLETE" == "true" ]] && args+=(--allow-incomplete)
+        [[ "$IN_VERBOSE" == "true" ]] && args+=(--verbose)
+        [[ "$IN_QUIET" == "true" ]] && args+=(--quiet)
+
+        uv run --quiet --locked --project "$GITHUB_ACTION_PATH" pii-scan "${args[@]}"
+        code=$?
+        {
+          echo "exit-code=$code"
+          echo "report-path=$IN_REPORT_PATH"
+        } >> "$GITHUB_OUTPUT"
+        exit 0
+
+    - name: Upload SARIF
+      if: ${{ always() && inputs.upload-sarif == 'true' && inputs.output-format == 'sarif' }}
+      uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+      with:
+        sarif_file: ${{ inputs.report-path }}
+        category: pii-scan
+
+    - name: Enforce result
+      shell: bash
+      env:
+        CODE: ${{ steps.scan.outputs.exit-code }}
+      run: |
+        case "$CODE" in
+          0) echo "pii-scan passed." ;;
+          1) echo "::error title=pii-scan::Findings at or above the fail-on threshold. See annotations and the job summary." ;;
+          3) echo "::error title=pii-scan::Some files could not be scanned. See the job summary." ;;
+          *) echo "::error title=pii-scan::pii-scan did not complete (exit code ${CODE:-unknown})." ;;
+        esac
+        exit "${CODE:-2}"

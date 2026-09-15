@@ -1,0 +1,68 @@
+# Local assistant / editor config (never commit)
+CLAUDE.md
+CLAUDE.local.md
+.claude/
+.mcp.json
+
+# Secrets and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+private/
+.private/
+
+# Session / state files
+sessions/
+.sessions/
+*.session
+
+# Scan outputs — these contain or reference PII
+output/
+reports/
+*.jsonl
+*.sarif
+*_report.json
+*_report.csv
+*_report.txt
+*.masked.*
+*_masked.*
+*_redacted.*
+.pii-scan/
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Real-world data dumps used for local testing (may contain PII)
+data/
+samples/private/
+*.zip
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+build/
+dist/
+*.egg-info/
+.eggs/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*~
+*.log

@@ -1,0 +1,223 @@
+# Configuration Reference
+
+> **Audience**: anyone tuning pii-scan. Settings are applied in order:
+> built-in defaults, then `--config FILE`, then command-line flags.
+
+- [Commands](#commands)
+- [Scan flags](#scan-flags)
+- [Output](#output)
+- [Configuration file](#configuration-file)
+- [1.0 configuration keys](#10-configuration-keys)
+- [Custom regex rules](#custom-regex-rules)
+- [Severities](#severities)
+- [Default excludes](#default-excludes)
+- [Environment variables](#environment-variables)
+
+## Commands
+
+| Command | Purpose |
+|---------|---------|
+| `pii-scan [scan] [PATH ...]` | Scan files (the `scan` word is optional) |
+| `pii-scan mask --from REPORT.jsonl --out DIR` | Write masked copies from a saved report ([Masking](masking.md)) |
+| `pii-scan doctor` | Check credentials, layers, and offset alignment |
+| `pii-scan version` | Print the version |
+
+## Scan flags
+
+### What to scan
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `PATH ...` | `.` | Files or directories |
+| `--all` | off | Scan everything under the paths instead of only git changes |
+| `--base REF` | auto | Git ref to diff against (changed-files mode) |
+| `--exclude-dirs A,B` | see [defaults](#default-excludes) | Directory names to skip, added to the defaults |
+| `--exclude-exts .a,.b` | see defaults | File suffixes to skip, added to the defaults |
+| `--exclude GLOB` | none | Root-relative glob to skip, repeatable (`archive/**`) |
+| `--max-file-size BYTES` | `10000000` | Larger files are reported as not scanned |
+| `--same-filesystem` | off | Do not descend into other mounts |
+| `--binary skip\|fail` | `skip` | Binary files are skipped, or counted as not scanned |
+
+### Detection
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--aws` | off | Use AWS detection: shorthand for `--layers regex,contains,detect` (can't be combined with `--layers`) |
+| `--layers LIST` | `regex` | Any of `regex,contains,guardrails,detect`, in order ([Detection Layers](detection-layers.md)) |
+| `--config FILE` | none | JSON configuration file |
+| `--custom-regex FILE` | none | Custom regex rules ([format](#custom-regex-rules)) |
+| `--min-confidence F` | `0.85` | Minimum score for `detect` results |
+| `--screen-threshold F` | `0.5` | Minimum `contains` label score to escalate a chunk |
+| `--entity-types LIST` | all except `DATE_TIME,URL,AGE` | AWS entity types to report |
+| `--region R` | AWS default | Region for AWS layers |
+| `--profile P` | AWS default | AWS profile |
+| `--language CODE` | `en` | Language sent to AWS (`detect` supports `en` and `es`) |
+| `--guardrail-id ID` | none | Bedrock guardrail ID or ARN (required for `guardrails`) |
+| `--guardrail-version V` | `DRAFT` | Guardrail version |
+| `--max-tps-contains N` | `20` | ContainsPiiEntities requests per second |
+| `--max-tps-detect N` | `40` | DetectPiiEntities requests per second |
+
+### Policy
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--fail-on LEVEL` | `high` | `critical`, `high`, `medium`, `low`, `any`, or `never` |
+| `--allow-incomplete` | off | Exit `0` even if some files could not be scanned |
+| `--baseline FILE` | none | Ignore findings recorded in this baseline |
+| `--write-baseline FILE` | none | Record all current findings as a baseline |
+
+Baselines key findings by path, type, and a keyed fingerprint, so both flags need
+`PII_SCAN_HMAC_KEY` set to the same value on every run.
+
+### Masking
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--mask-out DIR` | none | Write masked copies under DIR (must not overlap the scanned paths) |
+| `--mask-style STYLE` | `label` | `label`, `generic`, `stars`, `partial`, or `hash` |
+| `--mask-findings-only` | off | Write only files that had findings |
+
+### Performance
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--workers N` | `16` | File worker threads (raise for network shares) |
+| `--cache FILE` | none | SQLite cache that skips unchanged files on re-runs |
+
+## Output
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--output FORMAT` | `text` | `text`, `json`, `jsonl`, `csv`, or `sarif` |
+| `--report FILE` | stdout | Write the formatted output to a file (mode `0600`) |
+| `--github` | off | Add GitHub annotations and a job summary |
+| `--show-values` | off | Print raw values (refused when `CI` is set) |
+| `--progress auto\|lines\|none` | `auto` | Progress on stderr: a redrawn line on a terminal, plain lines every 30 s otherwise |
+| `-v`, `--verbose` | off | More detail on stderr |
+| `-q`, `--quiet` | off | Only findings and errors |
+
+stdout carries only the selected format; progress, warnings, errors, and the summary go to stderr.
+Output is plain ASCII with no color or emoji.
+
+| Format | Shape | Best for |
+|--------|-------|----------|
+| `text` | `path:line:col: SEVERITY TYPE (detector score): preview` | Terminals, editors |
+| `jsonl` | `file` and `finding` records, then one `summary` record | Large scans, `pii-scan mask --from` |
+| `json` | One document with the summary and files that had findings or errors | Small scans |
+| `csv` | One row per finding, formula-safe | Spreadsheets |
+| `sarif` | SARIF 2.1.0, capped at 25,000 results | GitHub code scanning |
+
+## Configuration file
+
+Every key is optional. Unknown keys, unknown entity types, and invalid values stop the run with
+exit code `2`.
+
+```json
+{
+  "version": 1,
+  "layers": ["regex", "contains", "detect"],
+  "fail_on": "high",
+  "min_confidence": 0.85,
+  "screen_threshold": 0.5,
+  "entity_types": ["NAME", "ADDRESS", "EMAIL", "PHONE", "SSN", "CREDIT_DEBIT_NUMBER"],
+  "severity": { "critical": ["NAME"], "low": ["EMAIL"] },
+  "validation_patterns": { "AWS_ACCESS_KEY": "(?:AKIA|ASIA)[0-9A-Z]{16}" },
+  "custom_rules": "custom_regex_patterns.json",
+  "exclude": { "dirs": ["dist"], "extensions": [".png"], "globs": ["archive/**"], "files": [], "replace_defaults": false },
+  "limits": { "workers": 32, "max_file_size": 10000000, "max_matches_per_rule": 500 },
+  "aws": {
+    "region": "us-east-1", "profile": null, "endpoint_url": null, "language": "en",
+    "tps_contains": 20, "tps_detect": 40, "guardrail_chars_per_second": 20000,
+    "guardrail_id": null, "guardrail_version": "DRAFT", "max_attempts": 8
+  },
+  "mask": { "style": "label", "findings_only": false }
+}
+```
+
+| Key | Description |
+|-----|-------------|
+| `layers` | Same as `--layers` |
+| `fail_on` | Same as `--fail-on` |
+| `min_confidence`, `screen_threshold` | Same as the flags |
+| `entity_types` | AWS entity types to report |
+| `severity` | Map of severity to entity types, overriding [defaults](#severities) |
+| `validation_patterns` | Map of entity type to a regex that AWS matches must fully match |
+| `custom_rules` | Custom rules file, relative to the configuration file |
+| `exclude` | Lists added to the defaults; `replace_defaults: true` replaces them |
+| `limits` | `workers`, `max_file_size`, `max_matches_per_rule` |
+| `aws` | Region, profile, endpoint (for example a VPC endpoint), language, rate limits, guardrail |
+| `mask` | `style` and `findings_only` |
+
+Keep configuration files you rely on for CI outside the code being scanned, or pass policy flags
+such as `--fail-on` explicitly: a pull request can edit files in its own tree.
+
+## 1.0 configuration keys
+
+Configuration files from 1.0 still load.
+
+| 1.0 key | Treated as |
+|---------|------------|
+| `max_workers` | `limits.workers` |
+| `min_confidence_score` | `min_confidence` |
+| `excluded_dirs`, `excluded_extensions` | Added to `exclude.dirs`, `exclude.extensions` |
+| `critical_entity_types` | `severity.critical` |
+| `security_relevant_entity_types` | `entity_types` |
+| `validation_patterns` | Unchanged |
+| `regex_patterns` | Custom rules (deprecated, warns) |
+| `max_bytes`, `batch_size`, `max_retries`, `retry_delay`, `text_check_blocksize`, `context_window` | Ignored with a warning |
+
+## Custom regex rules
+
+```json
+{
+  "rules": [
+    { "id": "employee-id", "pattern": "\\bEMP-\\d{6}\\b", "severity": "medium" },
+    { "id": "jdbc-password", "type": "CONNECTION_STRING",
+      "pattern": "(?i)jdbc:[a-z0-9]+://[^\\s;]*;password=([^;\\s]+)", "group": 1 }
+  ]
+}
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `id` | yes | Rule name, shown in reports |
+| `pattern` | yes | Python regular expression |
+| `type` | no | A known entity type, or omitted for `CUSTOM:<id>` |
+| `severity` | no | Defaults to the type's severity, or `high` for custom types |
+| `group` | no | Capture group holding the sensitive value (default: whole match) |
+
+The 1.0 format `{"Label": "pattern"}` is also accepted. If
+[google-re2](https://pypi.org/project/google-re2/) is installed (`pip install 'pii-scan[re2]'`),
+custom patterns compile with RE2 for linear-time matching when they don't use lookarounds or
+backreferences.
+
+## Severities
+
+| Severity | Entity types |
+|----------|--------------|
+| critical | `AWS_ACCESS_KEY`, `AWS_SECRET_KEY`, `PASSWORD`, `SSN`, `CREDIT_DEBIT_NUMBER`, `BANK_ACCOUNT_NUMBER`, `PRIVATE_KEY`, `GITHUB_TOKEN`, `SLACK_TOKEN`, `STRIPE_KEY`, `CONNECTION_STRING`, `US_INDIVIDUAL_TAX_IDENTIFICATION_NUMBER`, `INTERNATIONAL_BANK_ACCOUNT_NUMBER` |
+| high | `CREDIT_DEBIT_CVV`, `CREDIT_DEBIT_EXPIRY`, `PIN`, `BANK_ROUTING`, `PASSPORT_NUMBER`, `DRIVER_ID`, UK/CA/IN national identifiers, `JWT`, `BEARER_TOKEN`, `API_KEY`, `GENERIC_SECRET`, `GOOGLE_API_KEY`, and custom rule types |
+| medium | `NAME`, `ADDRESS`, `PHONE`, `EMAIL`, `USERNAME`, `SWIFT_CODE` |
+| low | `DATE_TIME`, `URL`, `AGE`, `IP_ADDRESS`, `MAC_ADDRESS`, `LICENSE_PLATE`, `VEHICLE_IDENTIFICATION_NUMBER` |
+
+## Default excludes
+
+- **Directories**: `.git .hg .svn node_modules .venv venv __pycache__ .tox .mypy_cache
+  .pytest_cache .ruff_cache .snapshot ~snapshot $RECYCLE.BIN "System Volume Information" .Trashes
+  .Spotlight-V100 .fseventsd .TemporaryItems lost+found`
+- **Suffixes**: `.min.js .map .svg .woff .woff2 .ttf .eot .otf`
+- **File names**: `.DS_Store Thumbs.db desktop.ini`
+- **Always skipped**: symlinks, FIFOs, sockets, and devices. Binary files are skipped by default.
+
+Skipped files are counted by reason in the summary.
+
+## Environment variables
+
+| Variable | Effect |
+|----------|--------|
+| `PII_SCAN_HMAC_KEY` | Key for fingerprints and `hash` masking. Required for baselines; set it to keep pseudonyms stable across runs. Without it, a random per-run key is used. |
+| `AWS_PROFILE`, `AWS_REGION`, `AWS_DEFAULT_REGION` | Standard AWS settings, used when flags don't set them |
+| `AWS_ENDPOINT_URL*` | Ignored unless `aws.endpoint_url` is set, so the environment can't redirect scanned text |
+| `CI` | When set, `--show-values` is refused and progress defaults to plain lines |
+| `GITHUB_STEP_SUMMARY` | Target for the job summary with `--github` |
+| `GITHUB_BASE_REF` | Used to find the diff base in pull request workflows |
