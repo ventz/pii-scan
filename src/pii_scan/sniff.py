@@ -20,6 +20,11 @@ _BAD_CONTROLS = bytes(b for b in range(0x20) if b not in _ALLOWED_CONTROLS)
 _NOT_BAD_CONTROLS = bytes(b for b in range(256) if b not in _BAD_CONTROLS)
 
 
+# Every name detect_encoding can return; reports naming anything else are refused by `mask --from`.
+ENCODINGS = frozenset({"utf-8", "utf-8-sig", "utf-16-le", "utf-16-be", "utf-32-le", "utf-32-be",
+                       "utf-16le", "utf-16be", "cp1252"})  # fmt: skip
+
+
 def _utf16_without_bom(sample: bytes) -> str | None:
     """Recognize BOM-less UTF-16 (common in Windows exports) by where the NUL bytes fall.
 

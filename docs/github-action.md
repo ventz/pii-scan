@@ -107,7 +107,7 @@ for those, or run AWS layers only on `push`.
 | `workers` | | File worker threads |
 | `aws-region` | | Region for AWS layers |
 | `guardrail-id` | | Bedrock guardrail for the `guardrails` layer |
-| `allow-incomplete` | `false` | Pass even if some files could not be scanned |
+| `allow-incomplete` | `false` | Pass even if some files could not be scanned. Leave it off for pull requests from untrusted contributors: a pull request can make a file unscannable on purpose (for example by making it undecodable) and so hide what is in it |
 | `verbose`, `quiet` | `false` | Log detail |
 
 ## Outputs
@@ -171,12 +171,14 @@ pushes to `main`; widen the `sub` condition deliberately, for example to a prote
 - **Policy lives in the workflow.** A pull request can edit files in its own tree, including the
   files passed as `config-file` and `custom-regex-file`. The action runs with
   `--restricted-config`, so those files can only add rules or raise severities; attempts to lower
-  severities, add excludes, change limits, or change AWS settings stop the run. Keep `fail-on` and
+  severities, add excludes, change limits, or change AWS settings stop the run. Custom rules must
+  use RE2 syntax (no lookarounds or backreferences), so a rule can't hang the job. Keep `fail-on` and
   `layers` as workflow inputs.
-- **Cost ceiling.** With AWS layers, consider a config or wrapper that sets `--aws-max-chars` for
-  scheduled full scans, so unexpectedly large inputs can't run up the bill.
+- **Cost ceiling.** The action has no input for `--aws-max-chars`, and a restricted config can't
+  set AWS options. For scheduled full scans with AWS layers, run pii-scan directly in a workflow
+  step with `--aws-max-chars`, so unexpectedly large inputs can't run up the bill.
 - **Inputs are data.** The action passes inputs to pii-scan through environment variables and a
   bash array, never through `eval`, and validates booleans and numbers.
 - **Runtime.** The action installs a pinned [uv](https://docs.astral.sh/uv/) version with a
   SHA-pinned `astral-sh/setup-uv`, and runs pii-scan from the action's own lockfile
-  (`uv run --locked --no-dev`) with the build backend pinned.
+  (`uv run --locked --no-dev --extra re2`) with the build backend pinned.

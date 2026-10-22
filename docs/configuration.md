@@ -31,7 +31,7 @@
 | `PATH ...` | `.` | Files or directories |
 | `--all` | off | Scan everything under the paths instead of only git changes |
 | `--base REF` | auto | Git ref to diff against (changed-files mode) |
-| `--trust-repo` | off | Allow changed-files mode when the repository's own `.git/config` sets filters, includes, fsmonitor, or diff commands, which could run commands (refused by default) |
+| `--trust-repo` | off | Allow changed-files mode when the repository's own git config (`.git/config`, or a worktree's `config.worktree`) sets filters, includes, fsmonitor, or diff commands, which could run commands (refused by default). Submodules are never examined |
 | `--exclude-dirs A,B` | see [defaults](#default-excludes) | Directory names to skip, added to the defaults |
 | `--exclude-exts .a,.b` | see defaults | File suffixes to skip, added to the defaults |
 | `--exclude GLOB` | none | Root-relative glob to skip, repeatable (`archive/**`) |
@@ -47,7 +47,7 @@
 | `--layers LIST` | `regex` | Any of `regex,contains,guardrails,detect`, in order ([Detection Layers](detection-layers.md)) |
 | `--config FILE` | none | JSON configuration file |
 | `--custom-regex FILE` | none | Custom regex rules ([format](#custom-regex-rules)) |
-| `--restricted-config` | off | Treat `--config` and `--custom-regex` as untrusted: they may only add rules or raise severities (used by the GitHub Action) |
+| `--restricted-config` | off | Treat `--config` and `--custom-regex` as untrusted: they may only add rules or raise severities, and custom rules must be RE2 syntax (used by the GitHub Action) |
 | `--min-confidence F` | `0.85` | Minimum score for `detect` results |
 | `--screen-threshold F` | `0.5` | Minimum `contains` label score to escalate a chunk |
 | `--entity-types LIST` | all except `DATE_TIME,URL,AGE` | AWS entity types to report |
@@ -132,7 +132,8 @@ exit code `2`.
   "aws": {
     "region": "us-east-1", "profile": null, "endpoint_url": null, "language": "en",
     "tps_contains": 20, "tps_detect": 40, "guardrail_chars_per_second": 20000,
-    "guardrail_id": null, "guardrail_version": "DRAFT", "max_attempts": 8
+    "guardrail_id": null, "guardrail_version": "DRAFT", "max_attempts": 8, "pool_size": 32,
+    "max_chars": null
   },
   "mask": { "style": "label", "findings_only": false }
 }
@@ -149,13 +150,19 @@ exit code `2`.
 | `custom_rules` | Custom rules file, relative to the configuration file |
 | `exclude` | Lists added to the defaults; `replace_defaults: true` replaces them |
 | `limits` | `workers`, `max_file_size`, `max_matches_per_rule` (a file where one rule matches more often is reported as not scanned, never partially masked) |
-| `aws` | Region, profile, endpoint (for example a VPC endpoint), language, rate limits, guardrail |
+| `aws` | Region, profile, endpoint (an `https://` URL, for example a VPC endpoint), language, rate limits, guardrail, retry attempts, connection pool size, and `max_chars` (same as `--aws-max-chars`) |
 | `mask` | `style` and `findings_only` |
 
 A pull request can edit files in its own tree. When the configuration file or custom rules come
 from the code being scanned, pass `--restricted-config`: the file may then only add rules
 (`custom_rules`, `regex_patterns`) or raise severities (`severity`, `critical_entity_types`), and
 anything else stops the run. The GitHub Action always does this.
+
+Values must have the types used in the example above: `true`/`false` for switches, whole numbers
+for counts and sizes, numbers for thresholds and rates, strings for names, and lists of strings (or
+one comma-separated string) for lists. A quoted number (`"40"`), a quoted boolean (`"false"`), or
+`null` for a key that has no "unset" value stops the run (exit `2`) instead of being guessed at.
+Remove a key to use its default. `version` must be `1` when present.
 
 ## 1.0 configuration keys
 
@@ -187,7 +194,7 @@ Configuration files from 1.0 still load.
 | Field | Required | Description |
 |-------|----------|-------------|
 | `id` | yes | Rule name, shown in reports |
-| `pattern` | yes | Python regular expression |
+| `pattern` | yes | Python regular expression (RE2 syntax under `--restricted-config`) |
 | `type` | no | A known entity type, or omitted for `CUSTOM:<id>` |
 | `severity` | no | Defaults to the type's severity, or `high` for custom types |
 | `group` | no | Capture group holding the sensitive value (default: whole match) |
@@ -195,7 +202,14 @@ Configuration files from 1.0 still load.
 The 1.0 format `{"Label": "pattern"}` is also accepted. If
 [google-re2](https://pypi.org/project/google-re2/) is installed (`pip install 'pii-scan[re2]'`),
 custom patterns compile with RE2 for linear-time matching when they don't use lookarounds or
-backreferences.
+backreferences. With `--restricted-config` there is no fallback: every custom pattern must compile
+with RE2, and google-re2 must be installed, so an untrusted rule can't cause catastrophic
+backtracking. The rules file must also be a regular file under the working directory, with at
+most 200 rules of at most 1,000 characters each.
+
+RE2 and Python `re` differ in a few classes: in RE2, `\d`, `\w`, `\s`, and `\b` are ASCII-only,
+while Python treats them as Unicode (so `\d` matches Arabic-Indic digits in Python but not in
+RE2). Write `[0-9]` or `\p{Nd}` explicitly when it matters.
 
 ## Severities
 

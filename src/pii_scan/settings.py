@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import math
 import os
+import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -113,8 +115,13 @@ class Settings:
             raise ConfigError("max_file_size must be positive")
         if self.max_matches_per_rule < 1:
             raise ConfigError("max_matches_per_rule must be at least 1")
-        if min(self.aws.tps_contains, self.aws.tps_detect, self.aws.guardrail_chars_per_second) <= 0:
+        rates = (self.aws.tps_contains, self.aws.tps_detect, self.aws.guardrail_chars_per_second)
+        if not all(math.isfinite(r) and r > 0 for r in rates):
             raise ConfigError("AWS rate limits (tps_contains, tps_detect, guardrail_chars_per_second) must be positive")
+        if self.aws.max_attempts < 1 or self.aws.pool_size < 1:
+            raise ConfigError("aws.max_attempts and aws.pool_size must be at least 1")
+        if self.aws.endpoint_url is not None and not self.aws.endpoint_url.startswith("https://"):
+            raise ConfigError("aws.endpoint_url must be an https:// URL")
         if self.output not in {"text", "json", "jsonl", "csv", "sarif"}:
             raise ConfigError(f"unknown output format {self.output!r}")
         if self.progress not in {"auto", "lines", "none"}:
@@ -124,7 +131,7 @@ class Settings:
         if self.show_values and in_ci():
             raise ConfigError("--show-values is refused in CI (values would land in build logs)")
         if self.aws.max_chars is not None and self.aws.max_chars < 1:
-            raise ConfigError("--aws-max-chars must be positive")
+            raise ConfigError("--aws-max-chars (aws.max_chars) must be positive")
         try:
             validate_type_names(self.entity_types)
         except ValueError as exc:
@@ -159,14 +166,46 @@ def parse_severity_or_never(value: str) -> Severity | None:
     return Severity.parse(v)
 
 
-def _csv(value: Any) -> list[str]:
-    if value is None:
-        return []
+def _bool(value: Any, where: str) -> bool:
+    """JSON true/false only: bool("false") would be True, which silently turns options on."""
+    if isinstance(value, bool):
+        return value
+    raise ConfigError(f"'{where}' must be true or false, got {value!r}")
+
+
+def _int(value: Any, where: str) -> int:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    raise ConfigError(f"'{where}' must be a whole number, got {value!r}")
+
+
+def _num(value: Any, where: str) -> float:
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+        return float(value)
+    raise ConfigError(f"'{where}' must be a number, got {value!r}")
+
+
+def _str(value: Any, where: str) -> str:
+    if isinstance(value, str):
+        return value
+    raise ConfigError(f"'{where}' must be a string, got {value!r}")
+
+
+# AwsSettings field -> (converter, may be null)
+_AWS_TYPES: dict[str, tuple[Any, bool]] = {
+    "region": (_str, True), "profile": (_str, True), "endpoint_url": (_str, True), "language": (_str, False),
+    "tps_contains": (_num, False), "tps_detect": (_num, False), "guardrail_chars_per_second": (_num, False),
+    "guardrail_id": (_str, True), "guardrail_version": (_str, False), "max_attempts": (_int, False),
+    "pool_size": (_int, False), "max_chars": (_int, True),
+}  # fmt: skip
+
+
+def _csv(value: Any, where: str) -> list[str]:
     if isinstance(value, str):
         return [v.strip() for v in value.split(",") if v.strip()]
-    if isinstance(value, (list, tuple, set, frozenset)):
-        return [str(v).strip() for v in value if str(v).strip()]
-    raise ConfigError(f"expected a list or comma-separated string, got {type(value).__name__}")
+    if isinstance(value, list) and all(isinstance(v, str) for v in value):
+        return [v.strip() for v in value if v.strip()]
+    raise ConfigError(f"'{where}' must be a list of strings or a comma-separated string, got {value!r}")
 
 
 def load_config_file(path: Path, base: Settings, *, restricted: bool = False) -> Settings:
@@ -211,23 +250,28 @@ def _load_config_file(path: Path, base: Settings, restricted: bool) -> Settings:
     def take(key: str) -> Any:
         return raw.pop(key, None)
 
-    raw.pop("version", None)
+    nulls = sorted(k for k, v in raw.items() if v is None)
+    if nulls:
+        raise ConfigError(f"{path}: null is not a valid value for: {', '.join(nulls)} (remove the key instead)")
+    version = raw.pop("version", 1)
+    if version != 1 or isinstance(version, bool):
+        raise ConfigError(f"{path}: unsupported config version {version!r} (expected 1)")
 
     # --- 1.0 flat keys (still accepted) -------------------------------------------------------
     if (v := take("max_workers")) is not None:
-        s["workers"] = int(v)
+        s["workers"] = _int(v, "max_workers")
     if (v := take("min_confidence_score")) is not None:
-        s["min_confidence"] = float(v)
+        s["min_confidence"] = _num(v, "min_confidence_score")
     if (v := take("excluded_dirs")) is not None:
-        s["exclude_dirs"] = tuple(dict.fromkeys([*base.exclude_dirs, *_csv(v)]))
+        s["exclude_dirs"] = tuple(dict.fromkeys([*base.exclude_dirs, *_csv(v, "excluded_dirs")]))
     if (v := take("excluded_extensions")) is not None:
-        s["exclude_extensions"] = tuple(dict.fromkeys([*base.exclude_extensions, *_csv(v)]))
+        s["exclude_extensions"] = tuple(dict.fromkeys([*base.exclude_extensions, *_csv(v, "excluded_extensions")]))
     if (v := take("critical_entity_types")) is not None:
-        names = set(_csv(v))
+        names = set(_csv(v, "critical_entity_types"))
         _validate_names(names, path)
         severity.update({t: Severity.CRITICAL for t in names})
     if (v := take("security_relevant_entity_types")) is not None:
-        names = set(_csv(v))
+        names = set(_csv(v, "security_relevant_entity_types"))
         _validate_names(names, path)
         s["entity_types"] = frozenset(names & COMPREHEND_TYPES) or base.entity_types
     if (v := take("regex_patterns")) is not None:
@@ -240,15 +284,15 @@ def _load_config_file(path: Path, base: Settings, restricted: bool) -> Settings:
 
     # --- version 1 keys ----------------------------------------------------------------------
     if (v := take("layers")) is not None:
-        s["layers"] = tuple(_csv(v))
+        s["layers"] = tuple(_csv(v, "layers"))
     if (v := take("fail_on")) is not None:
-        s["fail_on"] = parse_severity_or_never(str(v))
+        s["fail_on"] = parse_severity_or_never(_str(v, "fail_on"))
     if (v := take("min_confidence")) is not None:
-        s["min_confidence"] = float(v)
+        s["min_confidence"] = _num(v, "min_confidence")
     if (v := take("screen_threshold")) is not None:
-        s["screen_threshold"] = float(v)
+        s["screen_threshold"] = _num(v, "screen_threshold")
     if (v := take("entity_types")) is not None:
-        names = set(_csv(v))
+        names = set(_csv(v, "entity_types"))
         _validate_names(names, path)
         s["entity_types"] = frozenset(names)
     if (v := take("severity")) is not None:
@@ -256,7 +300,7 @@ def _load_config_file(path: Path, base: Settings, restricted: bool) -> Settings:
             raise ConfigError(f"{path}: 'severity' must map severity names to type lists")
         for level, names in v.items():
             sev = Severity.parse(level)
-            names_set = set(_csv(names))
+            names_set = set(_csv(names, f"severity.{level}"))
             _validate_names(names_set, path, allow_custom=True)
             if restricted:
                 lowered = sorted(t for t in names_set if sev < severity.get(t, Severity.HIGH))
@@ -268,18 +312,24 @@ def _load_config_file(path: Path, base: Settings, restricted: bool) -> Settings:
         if not isinstance(v, dict):
             raise ConfigError(f"{path}: 'validation_patterns' must be an object")
         _validate_names(set(v), path)
-        s["validation_patterns"] = {str(k): str(p) for k, p in v.items()}
+        patterns = {k: _str(p, f"validation_patterns.{k}") for k, p in v.items()}
+        for k, p in patterns.items():
+            try:
+                re.compile(p)
+            except re.error as exc:
+                raise ConfigError(f"{path}: validation_patterns.{k} is not a valid regular expression: {exc}") from exc
+        s["validation_patterns"] = patterns
     if (v := take("custom_rules")) is not None:
-        s["custom_rules"] = (cfg_dir / str(v)).resolve()
+        s["custom_rules"] = (cfg_dir / _str(v, "custom_rules")).resolve()
     if (v := take("exclude")) is not None:
         if not isinstance(v, dict):
             raise ConfigError(f"{path}: 'exclude' must be an object")
-        replace_defaults = bool(v.pop("replace_defaults", False))
+        replace_defaults = _bool(v.pop("replace_defaults", False), "exclude.replace_defaults")
         for key, attr in (("dirs", "exclude_dirs"), ("extensions", "exclude_extensions"),
                           ("globs", "exclude_globs"), ("files", "exclude_files")):  # fmt: skip
             if key in v:
                 start = () if replace_defaults else s.get(attr, getattr(base, attr))
-                s[attr] = tuple(dict.fromkeys([*start, *_csv(v.pop(key))]))
+                s[attr] = tuple(dict.fromkeys([*start, *_csv(v.pop(key), f"exclude.{key}")]))
         if v:
             raise ConfigError(f"{path}: unknown key(s) in 'exclude': {', '.join(sorted(v))}")
     if (v := take("limits")) is not None:
@@ -288,11 +338,11 @@ def _load_config_file(path: Path, base: Settings, restricted: bool) -> Settings:
         for key, attr in (("workers", "workers"), ("max_file_size", "max_file_size"),
                           ("max_matches_per_rule", "max_matches_per_rule")):  # fmt: skip
             if key in v:
-                s[attr] = int(v.pop(key))
+                s[attr] = _int(v.pop(key), f"limits.{key}")
         if v:
             raise ConfigError(f"{path}: unknown key(s) in 'limits': {', '.join(sorted(v))}")
     if (v := take("max_file_size")) is not None:
-        s["max_file_size"] = int(v)
+        s["max_file_size"] = _int(v, "max_file_size")
     if (v := take("aws")) is not None:
         if not isinstance(v, dict):
             raise ConfigError(f"{path}: 'aws' must be an object")
@@ -300,14 +350,16 @@ def _load_config_file(path: Path, base: Settings, restricted: bool) -> Settings:
         unknown = set(v) - allowed
         if unknown:
             raise ConfigError(f"{path}: unknown key(s) in 'aws': {', '.join(sorted(unknown))}")
-        aws.update(v)
+        for key, value in v.items():
+            convert, nullable = _AWS_TYPES[key]
+            aws[key] = None if value is None and nullable else convert(value, f"aws.{key}")
     if (v := take("mask")) is not None:
         if not isinstance(v, dict):
             raise ConfigError(f"{path}: 'mask' must be an object")
         if "style" in v:
-            s["mask_style"] = MaskStyle(v.pop("style"))
+            s["mask_style"] = MaskStyle(_str(v.pop("style"), "mask.style"))
         if "findings_only" in v:
-            s["mask_findings_only"] = bool(v.pop("findings_only"))
+            s["mask_findings_only"] = _bool(v.pop("findings_only"), "mask.findings_only")
         if v:
             raise ConfigError(f"{path}: unknown key(s) in 'mask': {', '.join(sorted(v))}")
 

@@ -23,7 +23,7 @@ from .detectors.aws import AwsSession
 from .detectors.base import DetectorError
 from .detectors.regex import RegexDetector
 from .layers import Layer, detect_remote
-from .masking import Masker, preview, safe_output_path, write_atomic
+from .masking import Masker, preview, safe_output_path, verify_masked, write_atomic
 from .models import FileResult, Finding, Severity, Span, Status
 from .settings import Settings
 from .sniff import SNIFF_BYTES, decode, detect_encoding, encode_like
@@ -405,10 +405,7 @@ class Scanner:
         else:
             regions = merge(spans, self.s.severity_of)
             masked = self.masker.apply(text, regions)
-            leaked = [text[g.start:g.end] for g in regions
-                      if g.end - g.start >= 6 and text[g.start:g.end] in masked]  # fmt: skip
-            if leaked:
-                raise ValueError(f"verification failed: {len(leaked)} value(s) still present after masking")
+            verify_masked(text, spans, masked)
             write_atomic(dest, encode_like(masked, encoding))
         r.masked_path = str(dest)
 

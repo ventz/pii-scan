@@ -8,9 +8,11 @@ import hmac
 import os
 import secrets
 import tempfile
+from collections.abc import Iterable
 from enum import StrEnum
 from pathlib import Path
 
+from .models import Span
 from .spans import MergedSpan
 
 
@@ -65,6 +67,22 @@ class Masker:
             pos = r.end
         out.append(text[pos:])
         return "".join(out)
+
+
+LEAK_CHECK_MIN_CHARS = 6
+
+
+def verify_masked(text: str, spans: Iterable[Span], masked: str) -> None:
+    """Raise if any detected value of LEAK_CHECK_MIN_CHARS+ characters still appears in the output.
+
+    Checks each detection on its own, not the merged regions: a value inside a larger merged region
+    can still appear unmasked elsewhere in the file. Shorter values are skipped: they also occur by
+    chance in unrelated text.
+    """
+    values = {text[s.start:s.end] for s in spans if s.end - s.start >= LEAK_CHECK_MIN_CHARS}
+    leaked = sum(1 for v in values if v and v in masked)
+    if leaked:
+        raise ValueError(f"verification failed: {leaked} value(s) still present after masking")
 
 
 def _stars(value: str) -> str:

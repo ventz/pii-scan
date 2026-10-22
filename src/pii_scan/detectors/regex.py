@@ -29,6 +29,7 @@ def luhn(value: str) -> bool:
     return total % 10 == 0
 
 
+_SURROGATES = re.compile("[\ud800-\udfff]")
 _CARD_PREFIX = re.compile(r"^(?:4|5[1-5]|2[2-7]|3[47]|3[068]|6011|65|64[4-9]|35)")
 
 
@@ -104,56 +105,100 @@ BUILTIN_RULES: tuple[Rule, ...] = (
 )  # fmt: skip
 
 
-def load_custom_rules(path: Path) -> list[Rule]:
+def load_custom_rules(path: Path, *, require_re2: bool = False) -> list[Rule]:
     """Load custom rules.
 
     Accepts the legacy format `{"Label": "pattern", ...}` or
     `{"rules": [{"id", "pattern", "type"?, "severity"?, "group"?}, ...]}`.
     Raises ValueError on any invalid entry (a bad policy file must stop the run).
+    With `require_re2` (untrusted rules, --restricted-config) every pattern must compile with RE2,
+    so a rule from a pull request can't hang the scan with catastrophic backtracking.
     """
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"cannot load custom rules from {path}: {exc}") from exc
 
-    entries: Iterable[dict]
     if isinstance(raw, dict) and "rules" in raw:
         entries = raw["rules"]
+        if not isinstance(entries, list):
+            raise ValueError(f"{path}: 'rules' must be a list")
     elif isinstance(raw, dict):
         entries = [{"id": k, "pattern": v} for k, v in raw.items()]
     else:
         raise ValueError(f"{path}: expected a JSON object")
 
+    if require_re2 and len(entries) > MAX_UNTRUSTED_RULES:
+        raise ValueError(f"{path}: more than {MAX_UNTRUSTED_RULES} rules, which --restricted-config refuses")
     rules: list[Rule] = []
     for i, e in enumerate(entries):
-        if not isinstance(e, dict) or not isinstance(e.get("pattern"), str) or not e.get("id"):
+        if not isinstance(e, dict) or not isinstance(e.get("pattern"), str) or not isinstance(e.get("id"), str) \
+                or not e["id"]:
             raise ValueError(f"{path}: rule #{i + 1} needs string 'id' and 'pattern'")
-        rule_type = str(e.get("type") or f"CUSTOM:{e['id']}")
-        if rule_type not in KNOWN_TYPES and not rule_type.startswith("CUSTOM:"):
-            raise ValueError(f"{path}: rule {e['id']!r} has unknown type {rule_type!r}")
+        rule_id = e["id"]
+        if require_re2 and len(e["pattern"]) > MAX_UNTRUSTED_PATTERN_CHARS:
+            raise ValueError(f"{path}: rule {rule_id!r} pattern is longer than {MAX_UNTRUSTED_PATTERN_CHARS} "
+                             "characters, which --restricted-config refuses")  # fmt: skip
+        unknown = set(e) - _RULE_KEYS
+        if unknown:
+            raise ValueError(f"{path}: rule {rule_id!r} has unknown key(s): {', '.join(sorted(unknown))}")
+        rule_type = e.get("type", f"CUSTOM:{rule_id}")
+        if not isinstance(rule_type, str) or (rule_type not in KNOWN_TYPES and not rule_type.startswith("CUSTOM:")):
+            raise ValueError(f"{path}: rule {rule_id!r} has unknown type {rule_type!r}")
         try:
-            pattern = _compile_custom(e["pattern"])
+            pattern = _compile_custom(e["pattern"], require_re2=require_re2)
+        except _RE2Required as exc:
+            raise ValueError(f"{path}: rule {rule_id!r}: {exc}") from exc
         except re.error as exc:
-            raise ValueError(f"{path}: rule {e['id']!r} has an invalid pattern: {exc}") from exc
-        group = int(e.get("group", 0))
-        if group > pattern.groups:
-            raise ValueError(f"{path}: rule {e['id']!r} group {group} does not exist")
-        severity = Severity.parse(e["severity"]) if e.get("severity") else (
-            None if rule_type in KNOWN_TYPES else CUSTOM_RULE_SEVERITY
-        )  # fmt: skip
-        rules.append(Rule(str(e["id"]), rule_type, pattern, group, 1.0, None, severity))
+            raise ValueError(f"{path}: rule {rule_id!r} has an invalid pattern: {exc}") from exc
+        group = e.get("group", 0)
+        if not isinstance(group, int) or isinstance(group, bool) or not 0 <= group <= pattern.groups:
+            raise ValueError(f"{path}: rule {rule_id!r} group {group!r} does not exist")
+        severity = e.get("severity")
+        if severity is None:
+            severity = None if rule_type in KNOWN_TYPES else CUSTOM_RULE_SEVERITY
+        elif isinstance(severity, str):
+            severity = Severity.parse(severity)
+        else:
+            raise ValueError(f"{path}: rule {rule_id!r} severity must be a string")
+        rules.append(Rule(rule_id, rule_type, pattern, group, 1.0, None, severity))
     return rules
 
 
-def _compile_custom(pattern: str) -> re.Pattern[str]:
-    """Prefer RE2 (linear time) for untrusted custom patterns when google-re2 is installed."""
+_RULE_KEYS = frozenset({"id", "pattern", "type", "severity", "group"})
+# Limits for rules from an untrusted tree (--restricted-config): RE2 is linear, but not free.
+MAX_UNTRUSTED_RULES = 200
+MAX_UNTRUSTED_PATTERN_CHARS = 1000
+
+
+class _RE2Required(Exception):
+    pass
+
+
+def _compile_custom(pattern: str, *, require_re2: bool = False) -> re.Pattern[str]:
+    """Prefer RE2 (linear time) for custom patterns when google-re2 is installed.
+
+    Trusted rules fall back to Python `re` for syntax RE2 lacks; with `require_re2` they never do.
+    """
     try:
         import re2  # type: ignore[import-not-found]
     except ImportError:
+        if require_re2:
+            raise _RE2Required("custom rules under --restricted-config need google-re2 "
+                               "(install pii-scan[re2])") from None  # fmt: skip
         return re.compile(pattern)
+    if not hasattr(re2, "Options"):  # some other package named "re2", possibly backed by Python re
+        if require_re2:
+            raise _RE2Required("the installed 're2' module is not google-re2 (install pii-scan[re2])")
+        return re.compile(pattern)
+    options = re2.Options()
+    options.log_errors = False  # rejections are reported as errors here, not as C++ log lines on stderr
     try:
-        return re2.compile(pattern)  # type: ignore[no-any-return]
-    except Exception:  # noqa: BLE001 - RE2 rejects backreferences/lookarounds; fall back to re
+        return re2.compile(pattern, options)  # type: ignore[no-any-return]
+    except Exception as exc:  # noqa: BLE001 - RE2 rejects backreferences/lookarounds
+        if require_re2:
+            raise _RE2Required(f"pattern is not valid RE2 syntax, which --restricted-config requires "
+                               f"(no lookarounds or backreferences): {exc}") from None  # fmt: skip
         return re.compile(pattern)
 
 
@@ -167,6 +212,7 @@ class RegexDetector:
     def detect(self, text: str) -> list[Span]:
         out: list[Span] = []
         lowered: str | None = None
+        re2_text: str | None = None
         for rule in self.rules:
             if rule.triggers:
                 if rule.triggers_ci:
@@ -177,8 +223,15 @@ class RegexDetector:
                     hay = text
                 if not any(t in hay for t in rule.triggers):
                     continue
+            hay_text = text
+            if not isinstance(rule.pattern, re.Pattern):
+                # google-re2 encodes to strict UTF-8, which lone surrogates (undecodable bytes) fail.
+                # One U+FFFD per surrogate keeps every offset unchanged.
+                if re2_text is None:
+                    re2_text = text if text.isascii() else _SURROGATES.sub("\ufffd", text)
+                hay_text = re2_text
             count = 0
-            for m in rule.pattern.finditer(text):
+            for m in rule.pattern.finditer(hay_text):
                 start, end = m.span(rule.group)
                 if start < 0 or end <= start:
                     continue

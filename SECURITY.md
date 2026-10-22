@@ -29,11 +29,15 @@ around; a violation of any of them is a security bug.
   Built-in regex rules avoid catastrophic backtracking. A file where one rule exceeds the match cap
   is reported as not scanned rather than partially reported or masked.
 - **Git is invoked defensively.** `core.fsmonitor`, hooks, and external diff drivers are disabled,
-  git runs only in changed-files mode, and repositories whose own `.git/config` sets filters,
-  includes, or diff commands are refused unless `--trust-repo` is given.
+  git runs only in changed-files mode, and repositories whose own git config (`.git/config` or a
+  worktree's `config.worktree`) sets filters, includes, or diff commands are refused unless
+  `--trust-repo` is given. Submodules are never examined, so their own config can't run anything;
+  git never fetches or uses any transport, so a partial clone can't trigger a download; and git
+  is run by absolute path from `PATH`, never from the scanned directory.
 - **Untrusted configuration can't loosen policy.** With `--restricted-config` (always on in the
   GitHub Action), a configuration or custom rules file from the scanned tree can only add rules or
-  raise severities.
+  raise severities, and custom rules must compile as linear-time RE2 and live under the working
+  directory.
 - **Spending is bounded on request.** `--aws-max-chars` stops the run once a character budget has
   been sent to AWS.
 - **AWS endpoints are pinned.** `AWS_ENDPOINT_URL*` environment variables are ignored unless an

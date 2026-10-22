@@ -53,7 +53,7 @@ curl -sO https://raw.githubusercontent.com/ventz/pii-scan/main/sample_testing_da
 pii-scan --all sample_testing_data.txt
 ```
 
-Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/). For pip, running from a checkout,
+Requires Python 3.11+, [uv](https://docs.astral.sh/uv/), and git 2.26+ for changed-files mode. For pip, running from a checkout,
 and AWS setup, see [Getting Started](docs/getting-started.md).
 
 ## Examples

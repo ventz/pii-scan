@@ -9,10 +9,15 @@ Requires [uv](https://docs.astral.sh/uv/) and git.
 ```bash
 git clone https://github.com/ventz/pii-scan
 cd pii-scan
-uv sync
-uv run pytest
+uv sync --extra re2
+uv run --extra re2 pytest
 uv run ruff check src tests
 ```
+
+The `re2` extra installs google-re2, which the `--restricted-config` tests need (they skip
+without it). Plain `uv run` or `uv sync` removes extras that aren't requested. google-re2 has no
+wheels for free-threaded Python (3.14t), so those tests skip there. CI runs the suite on Linux and
+macOS with Python 3.11 to 3.14 and 3.14t.
 
 Run the CLI from the checkout with `uv run pii-scan ...` (or the `./pii_scan` shim).
 

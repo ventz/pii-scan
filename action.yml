@@ -170,7 +170,8 @@ runs:
         [[ "$IN_VERBOSE" == "true" ]] && args+=(--verbose)
         [[ "$IN_QUIET" == "true" ]] && args+=(--quiet)
 
-        uv run --quiet --locked --no-dev --project "$GITHUB_ACTION_PATH" pii-scan "${args[@]}"
+        # re2: custom rules from the tree must compile as linear-time RE2 under --restricted-config
+        uv run --quiet --locked --no-dev --extra re2 --project "$GITHUB_ACTION_PATH" pii-scan "${args[@]}"
         code=$?
         {
           echo "exit-code=$code"

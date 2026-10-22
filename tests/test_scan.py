@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from pii_scan import __version__
 from pii_scan.cli import main
 from pii_scan.detectors.regex import BUILTIN_RULES, RegexDetector
 from pii_scan.sources.base import ReadError
@@ -175,7 +176,7 @@ def test_help_shows_scan_options(argv, capsys):
 def test_version_and_subcommand_help(capsys):
     with pytest.raises(SystemExit):
         main(["--version"])
-    assert "pii-scan 1.1.0" in capsys.readouterr().out
+    assert f"pii-scan {__version__}" in capsys.readouterr().out
     with pytest.raises(SystemExit):
         main(["mask", "--help"])
     assert "--from" in capsys.readouterr().out

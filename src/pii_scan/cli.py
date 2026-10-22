@@ -12,6 +12,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import sys
 import threading
 from dataclasses import replace
@@ -22,11 +23,11 @@ from .console import Console
 from .detectors.aws import AwsSession, ComprehendDetector, ContainsScreen, GuardrailsDetector
 from .detectors.base import DetectorError
 from .detectors.regex import BUILTIN_RULES, RegexDetector, Rule, load_custom_rules
-from .masking import Masker, MaskStyle, safe_output_path, write_atomic
-from .models import Status
+from .masking import Masker, MaskStyle, safe_output_path, verify_masked, write_atomic
+from .models import Span, Status
 from .settings import ConfigError, Settings, load_config_file, parse_severity_or_never
 from .sinks import CsvSink, GithubSink, JsonlSink, JsonSink, MultiSink, SarifSink, TextSink
-from .sniff import decode, encode_like
+from .sniff import ENCODINGS, decode, encode_like
 from .sources.fs import Excludes, FilesystemSource
 from .sources.git import GitChangedSource, GitError
 from .spans import dedupe, merge
@@ -79,8 +80,8 @@ def _add_scan_args(p: argparse.ArgumentParser) -> None:
     g.add_argument("--all", action="store_true", help="scan everything under the paths (default: only git changes)")
     g.add_argument("--base", metavar="REF", help="git ref to diff against in changed-files mode")
     g.add_argument("--trust-repo", action="store_true",
-                   help="allow changed-files mode in repositories whose .git/config "
-                        "sets filters or includes")
+                   help="allow changed-files mode in repositories whose own git config "
+                        "(local or worktree) sets filters, includes, or diff commands")
     g.add_argument("--exclude-dirs", metavar="LIST",
                    help="comma-separated directory names to skip (added to defaults)")
     g.add_argument("--exclude-exts", metavar="LIST", help="comma-separated file suffixes to skip (added to defaults)")
@@ -98,8 +99,8 @@ def _add_scan_args(p: argparse.ArgumentParser) -> None:
     g.add_argument("--config", metavar="FILE", help="JSON configuration file")
     g.add_argument("--custom-regex", metavar="FILE", help="JSON file with custom regex rules")
     g.add_argument("--restricted-config", action="store_true",
-                   help="treat --config and --custom-regex as untrusted: "
-                        "they may only add rules or raise severities")
+                   help="treat --config and --custom-regex as untrusted: they may only add rules "
+                        "(RE2 syntax, under the working directory) or raise severities")
     g.add_argument("--min-confidence", type=float, metavar="SCORE",
                    help="minimum score for AWS detections (default 0.85)")
     g.add_argument("--screen-threshold", type=float, metavar="SCORE",
@@ -213,6 +214,9 @@ def main(argv: list[str] | None = None) -> int:
         with contextlib.suppress(OSError):
             os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
         return EXIT_BROKEN_PIPE
+    except Exception as exc:  # noqa: BLE001 - a crash must never exit 1, which means "findings"
+        Console().error(f"internal error: {type(exc).__name__}: {exc}")
+        return EXIT_USAGE
 
 
 # --- scan ----------------------------------------------------------------------------------------
@@ -306,11 +310,24 @@ def settings_from_args(args: argparse.Namespace) -> Settings:
     return s.validate()
 
 
+def _untrusted_rules_file(path: Path) -> None:
+    """Under --restricted-config the rules file comes from the scanned tree: keep it there."""
+    real = path.resolve()
+    workspace = Path.cwd().resolve()
+    if real != workspace and workspace not in real.parents:
+        raise ConfigError(f"custom rules file {path} is outside the working directory, "
+                          "which --restricted-config refuses")  # fmt: skip
+    if not real.is_file():
+        raise ConfigError(f"custom rules file {path} is not a regular file")
+
+
 def build_rules(s: Settings) -> list[Rule]:
     rules = list(BUILTIN_RULES)
     if s.custom_rules:
+        if s.restricted_config:
+            _untrusted_rules_file(s.custom_rules)
         try:
-            rules += load_custom_rules(s.custom_rules)
+            rules += load_custom_rules(s.custom_rules, require_re2=s.restricted_config)
         except ValueError as exc:
             raise ConfigError(str(exc)) from exc
     legacy = getattr(s, "_legacy_regex_patterns", None)
@@ -320,7 +337,7 @@ def build_rules(s: Settings) -> list[Rule]:
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
             json.dump(legacy, fh)
         try:
-            rules += load_custom_rules(Path(fh.name))
+            rules += load_custom_rules(Path(fh.name), require_re2=s.restricted_config)
         except ValueError as exc:
             raise ConfigError(f"regex_patterns: {exc}") from exc
         finally:
@@ -476,7 +493,6 @@ def _open_report(path: Path):  # noqa: ANN202 - text stream
 
 
 def cmd_mask(args: argparse.Namespace) -> int:
-    from .models import Span
     from .sources.base import ReadError
     from .sources.fs import read_regular_file
 
@@ -487,16 +503,23 @@ def cmd_mask(args: argparse.Namespace) -> int:
     spans: dict[str, list[Span]] = {}
     try:
         with open(args.source, encoding="utf-8") as fh:
-            for line in fh:
+            for lineno, line in enumerate(fh, 1):
                 if not line.strip():
                     continue
-                rec = json.loads(line)
-                if rec.get("kind") == "file" and rec.get("status") in (Status.CLEAN.value, Status.FINDINGS.value):
-                    files[rec["path"]] = rec
-                elif rec.get("kind") == "finding":
-                    spans.setdefault(rec["path"], []).append(
-                        Span(int(rec["start"]), int(rec["end"]), rec["type"], float(rec["score"]), rec["detector"]))
-    except (OSError, json.JSONDecodeError, KeyError) as exc:
+                try:
+                    rec = json.loads(line)
+                    if not isinstance(rec, dict):
+                        raise ValueError("expected a JSON object")
+                    kind = rec.get("kind")
+                    if kind == "file" and rec.get("status") in (Status.CLEAN.value, Status.FINDINGS.value):
+                        files[_report_str(rec, "path")] = _file_record(rec)
+                    elif kind == "finding":
+                        spans.setdefault(_report_str(rec, "path"), []).append(_finding_span(rec))
+                except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+                    raise ConfigError(
+                        f"report {args.source} line {lineno} is not a valid pii-scan record: {exc}"
+                    ) from exc
+    except OSError as exc:
         raise ConfigError(f"cannot read report {args.source}: {exc}") from exc
 
     from .entities import DEFAULT_SEVERITY
@@ -525,17 +548,21 @@ def cmd_mask(args: argparse.Namespace) -> int:
     for path, rec in files.items():
         file_spans = spans.get(path, [])
         try:
-            data = read_regular_file(path, max(int(rec["size"]), 0) + 1)
+            data = read_regular_file(path, rec["size"] + 1)
             if hashlib.sha256(data).hexdigest() != rec["sha256"]:
                 raise ValueError("file changed since the scan")
             text = decode(data, rec["encoding"])
+            if any(s.end > len(text) for s in file_spans):
+                raise ValueError("the report has findings beyond the end of the file")
             all_spans = dedupe([*file_spans, *recheck.detect(text)])
             if not all_spans and args.findings_only:
                 continue
             dest = safe_output_path(out, rec["relpath"] or Path(path).name)
             if all_spans:
                 regions = merge(all_spans, lambda t: DEFAULT_SEVERITY.get(t, Severity.HIGH))
-                write_atomic(dest, encode_like(masker.apply(text, regions), rec["encoding"]))
+                masked = masker.apply(text, regions)
+                verify_masked(text, all_spans, masked)
+                write_atomic(dest, encode_like(masked, rec["encoding"]))
             else:
                 write_atomic(dest, data)
             written += 1
@@ -544,6 +571,41 @@ def cmd_mask(args: argparse.Namespace) -> int:
             console.error(f"{path}: not masked: {exc}")
     console.info(f"Masked copies: {written:,} written, {failed:,} failed, under {out}.")
     return EXIT_INCOMPLETE if failed else EXIT_OK
+
+
+def _report_str(rec: dict, key: str) -> str:
+    value = rec[key]
+    if not isinstance(value, str):
+        raise TypeError(f"{key!r} must be a string")
+    return value
+
+
+def _report_int(rec: dict, key: str) -> int:
+    value = rec[key]
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise TypeError(f"{key!r} must be a non-negative integer")
+    return value
+
+
+def _file_record(rec: dict) -> dict:
+    """The fields mask --from relies on, checked so a damaged report stops the run instead of crashing it."""
+    _report_int(rec, "size")
+    if not re.fullmatch(r"[0-9a-f]{64}", _report_str(rec, "sha256")):
+        raise ValueError("'sha256' must be 64 hex characters")
+    if _report_str(rec, "encoding") not in ENCODINGS:
+        raise ValueError(f"unknown encoding {rec['encoding']!r}")
+    _report_str(rec, "relpath")
+    return rec
+
+
+def _finding_span(rec: dict) -> Span:
+    start, end = _report_int(rec, "start"), _report_int(rec, "end")
+    if end <= start:
+        raise ValueError("'end' must be greater than 'start'")
+    score = rec["score"]
+    if not isinstance(score, (int, float)) or isinstance(score, bool):
+        raise TypeError("'score' must be a number")
+    return Span(start, end, _report_str(rec, "type"), float(score), _report_str(rec, "detector"))
 
 
 # --- doctor --------------------------------------------------------------------------------------

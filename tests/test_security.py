@@ -50,10 +50,12 @@ def test_restricted_config_allows_raising(tree: Path, tmp_path: Path):
     assert run("--all", str(tree), "--config", str(cfg), "--restricted-config", "--fail-on", "critical") == 1
 
 
-def test_restricted_custom_rule_cannot_downgrade(tree: Path, tmp_path: Path):
+def test_restricted_custom_rule_cannot_downgrade(tree: Path, tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)  # untrusted rules files must be under the working directory
     rules = tmp_path / "r.json"
-    rules.write_text(json.dumps({"rules": [{"id": "x", "type": "SSN", "severity": "low", "pattern": "(?!)"}]}))
+    rules.write_text(json.dumps({"rules": [{"id": "x", "type": "SSN", "severity": "low", "pattern": "QQQ-NEVER"}]}))
     assert run("--all", str(tree), "--custom-regex", str(rules), "--restricted-config") == 2
+    assert run("--all", str(tree), "--custom-regex", str(rules), "--fail-on", "never") == 0  # trusted: allowed
 
 
 # --- git ---------------------------------------------------------------------------------------

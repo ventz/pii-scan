@@ -77,10 +77,10 @@ rare but possible across very large estates: treat them as pseudonyms, not uniqu
   exits `3`.
 - **Overlaps are merged first.** Overlapping findings (for example a regex hit inside a NAME) are
   combined into one region, labeled with the most severe type, before any replacement.
-- **Verification.** After masking, pii-scan checks that no masked value of six or more
-  characters is still present in the file. If one is, the file is not written.
-- **Byte-exact everywhere else.** Encoding (UTF-8 with or without BOM, UTF-16 and UTF-32 with or
-  without BOM, Windows-1252) and line endings are preserved outside the masked regions.
+- **Verification.** After masking, inline or with `mask --from`, pii-scan checks that no masked
+  value of six or more characters is still present in the file. If one is, the file is not written.
+- **Byte-exact everywhere else.** Encoding (UTF-8 with or without BOM, UTF-16 with or without
+  BOM, UTF-32 with BOM, Windows-1252) and line endings are preserved outside the masked regions.
   Undecodable bytes in UTF-8 and Windows-1252 files survive unchanged; invalid sequences in UTF-16
   and UTF-32 files are replaced.
 - **Safe writes.** The output directory must not overlap the scanned paths. Files are written

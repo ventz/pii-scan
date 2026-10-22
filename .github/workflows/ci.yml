@@ -1,0 +1,135 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # superseded pull request runs are cancelled; every run on main finishes
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ['3.11', '3.12', '3.13', '3.14']
+        re2: [true]
+        include:
+          # free-threaded builds: google-re2 publishes no wheels for them, so its tests skip
+          - { os: ubuntu-latest, python: '3.14t', re2: false }
+          - { os: macos-latest, python: '3.14t', re2: false }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: '0.12.13'
+      - name: Install
+        env:
+          PYTHON: ${{ matrix.python }}
+          RE2: ${{ matrix.re2 }}
+        run: |
+          args=(--locked --python "$PYTHON")
+          [[ "$RE2" == "true" ]] && args+=(--extra re2)
+          uv sync "${args[@]}"
+      - name: Test
+        run: uv run --no-sync pytest -q
+
+  windows:
+    # Windows is not a supported platform yet (no O_NOFOLLOW, no fd realpath check, symlinks need
+    # privileges). This job reports what breaks there without blocking merges.
+    name: test (windows-latest, 3.13, informational)
+    runs-on: windows-latest
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: '0.12.13'
+      - run: uv sync --locked --python 3.13 --extra re2
+      - run: uv run --no-sync pytest -q
+
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: '0.12.13'
+      - run: uv sync --locked
+      - run: uv run --no-sync ruff check src tests
+      - name: actionlint
+        run: uvx --from actionlint-py==1.7.12.25 actionlint
+
+  action:
+    # Runs this repository's action.yml the way a consumer would.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Prepare inputs
+        run: |
+          mkdir -p ci-clean
+          echo "nothing sensitive here" > ci-clean/notes.txt
+          echo '{"rules": [{"id": "emp", "pattern": "EMP-[0-9]{6}"}]}' > ci-rules-re2.json
+          echo '{"rules": [{"id": "emp", "pattern": "EMP-(?=[0-9])[0-9]{6}"}]}' > ci-rules-lookahead.json
+      - name: Clean tree passes
+        id: clean
+        uses: ./
+        with:
+          paths: ci-clean
+          scan-all: 'true'
+          output-format: jsonl
+      - name: Sample data fails with findings
+        id: sample
+        continue-on-error: true
+        uses: ./
+        with:
+          paths: sample_testing_data.txt
+          scan-all: 'true'
+      - name: RE2 custom rule is accepted
+        id: re2
+        uses: ./
+        with:
+          paths: ci-clean
+          scan-all: 'true'
+          custom-regex-file: ci-rules-re2.json
+      - name: Lookahead custom rule is refused
+        id: lookahead
+        continue-on-error: true
+        uses: ./
+        with:
+          paths: ci-clean
+          scan-all: 'true'
+          custom-regex-file: ci-rules-lookahead.json
+      - name: Check exit codes
+        env:
+          CLEAN: ${{ steps.clean.outputs.exit-code }}
+          SAMPLE: ${{ steps.sample.outputs.exit-code }}
+          RE2: ${{ steps.re2.outputs.exit-code }}
+          LOOKAHEAD: ${{ steps.lookahead.outputs.exit-code }}
+        run: |
+          check() { [[ "$2" == "$3" ]] || { echo "::error::$1 exited ${2:-unknown}, expected $3"; exit 1; }; }
+          check "clean scan" "$CLEAN" 0
+          check "sample scan" "$SAMPLE" 1
+          check "RE2 custom rule" "$RE2" 0
+          check "lookahead custom rule" "$LOOKAHEAD" 2
