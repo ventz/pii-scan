@@ -86,14 +86,14 @@ Baselines key findings by path (relative to the working directory, so the same b
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--workers N` | `16` | File worker threads (raise for network shares) |
-| `--cache FILE` | none | SQLite cache that skips unchanged files on re-runs |
+| `--cache FILE` | none | SQLite cache that skips unchanged files on re-runs: a file is rescanned when its path, size, modification or change time, or the configuration changes. Created owner-only; keep it on local disk. Not used with `--mask-out` or `--show-values`. On Windows each file is opened once more to read its NTFS change time |
 
 ## Output
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--output FORMAT` | `text` | `text`, `json`, `jsonl`, `csv`, or `sarif` |
-| `--report FILE` | stdout | Write the formatted output to a file (mode `0600`) |
+| `--report FILE` | stdout | Write the formatted output to a file (mode `0600`; on Windows, an ACL for the current user and SYSTEM only) |
 | `--github` | off | Add GitHub annotations and a job summary |
 | `--show-values` | off | Print raw values (refused when `CI` is set) |
 | `--progress auto\|lines\|none` | `auto` | Progress on stderr: a redrawn line on a terminal, plain lines every 30 s otherwise |
@@ -227,7 +227,9 @@ RE2). Write `[0-9]` or `\p{Nd}` explicitly when it matters.
   .Spotlight-V100 .fseventsd .TemporaryItems lost+found`
 - **Suffixes**: `.min.js .map .svg .woff .woff2 .ttf .eot .otf`
 - **File names**: `.DS_Store Thumbs.db desktop.ini`
-- **Always skipped**: symlinks, FIFOs, sockets, and devices. Binary files are skipped by default.
+- **Always skipped**: symlinks (and on Windows junctions and other link-type reparse points), FIFOs,
+  sockets, and devices. Binary files are skipped by default. Cloud placeholders whose data isn't on
+  the machine are reported as not scanned (`offline_placeholder`) rather than downloaded.
 
 Skipped files are counted by reason in the summary.
 

@@ -13,6 +13,7 @@ import json
 import math
 import os
 import re
+import stat
 import sys
 import threading
 from dataclasses import replace
@@ -25,6 +26,7 @@ from .detectors.base import DetectorError
 from .detectors.regex import BUILTIN_RULES, RegexDetector, Rule, load_custom_rules
 from .masking import Masker, MaskStyle, safe_output_path, verify_masked, write_atomic
 from .models import Span, Status
+from .private import WINDOWS, make_private_fd
 from .settings import ConfigError, Settings, load_config_file, parse_severity_or_never
 from .sinks import CsvSink, GithubSink, JsonlSink, JsonSink, MultiSink, SarifSink, TextSink
 from .sniff import ENCODINGS, decode, encode_like
@@ -396,14 +398,15 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
     excludes = Excludes(s.exclude_dirs, s.exclude_extensions, s.exclude_globs, s.exclude_files)
     if s.scan_all:
-        source = FilesystemSource(s.paths, excludes, max_file_size=s.max_file_size, same_filesystem=s.same_filesystem)
+        source = FilesystemSource(s.paths, excludes, max_file_size=s.max_file_size, same_filesystem=s.same_filesystem,
+                                  precise_change_time=s.cache is not None)  # fmt: skip
         source.name = "fs"  # type: ignore[attr-defined]
     else:
         if len(s.paths) != 1:
             raise ConfigError("changed-files mode takes one path; use --all to scan several")
         try:
             source = GitChangedSource(Path(s.paths[0]), s.base, excludes, max_file_size=s.max_file_size,
-                                      trust_repo=s.trust_repo)  # fmt: skip
+                                      trust_repo=s.trust_repo, precise_change_time=s.cache is not None)  # fmt: skip
         except GitError as exc:
             raise ConfigError(f"{exc}. To scan a directory that is not a git checkout, add --all.") from exc
         source.name = "git"  # type: ignore[attr-defined]
@@ -478,14 +481,28 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
 
 def _open_report(path: Path):  # noqa: ANN202 - text stream
-    """Create or truncate the report without following a symlink, with owner-only permissions."""
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    """Create or overwrite the report without following a link, with owner-only permissions.
+
+    An existing file is made private first and only then emptied, so a report that can't be made
+    private is left as it was.
+    """
     try:
-        fd = os.open(path, flags, 0o600)
+        if WINDOWS:
+            from .winapi import open_for_writing
+
+            fd = open_for_writing(str(path))
+        else:
+            flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+            fd = os.open(path, flags, 0o600)
     except OSError as exc:
         raise ConfigError(f"cannot write report {path}: {exc.strerror or exc} (symlinks are refused)") from exc
-    with contextlib.suppress(OSError):
-        os.fchmod(fd, 0o600)
+    try:
+        make_private_fd(fd, 0o600)  # the open file itself, before anything is written
+        if stat.S_ISREG(os.fstat(fd).st_mode):  # devices such as /dev/null and NUL can't be truncated
+            os.ftruncate(fd, 0)
+    except OSError as exc:
+        os.close(fd)
+        raise ConfigError(f"cannot make report {path} private or empty it: {exc.strerror or exc}") from exc
     return os.fdopen(fd, "w", encoding="utf-8", newline="")
 
 

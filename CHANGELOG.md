@@ -4,6 +4,72 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+## [1.2.0] - 2026-10-23
+
+Windows support. One behavior change on macOS: see **Changed**.
+
+### Changed
+
+- **Cloud placeholder files are no longer downloaded to scan them.** On macOS, an iCloud Drive
+  (or other File Provider) file whose data isn't stored locally ("dataless") used to be read,
+  which downloaded it, and then scanned. It is now reported as not scanned
+  (`offline_placeholder`), so a scan that meets one exits `3`. Make such files available offline
+  first (`brctl download <path>`), or pass `--allow-incomplete`. OneDrive online-only and other
+  offline or recall-on-access files on Windows are handled the same way.
+
+### Security
+
+- **Windows gets the same file protections as Linux and macOS.** Before, the check that an
+  opened file is under the scan root was skipped on Windows, symlinks were only checked before
+  opening (a race), junctions weren't treated as links at all, and `chmod` didn't make reports,
+  caches, baselines, or masked copies private. Now:
+  - symlinks, junctions, and other name-surrogate reparse points are skipped while walking and
+    refused when reading, and every opened file's final path must be under the scan root;
+  - reports, caches, baselines, masked files, and masked folders get a protected ACL (current
+    user and SYSTEM only) before any data is written;
+  - reports, temporary files, masked folders, and the cache database are created with that ACL,
+    so no other account can open them in the moment before it would otherwise be applied;
+  - a report path that is a link, or a cloud or deduplicated file, is refused without truncating
+    or writing through it;
+  - files are opened, and folders listed, by their exact name (`\\?\` form), so a name with a
+    trailing dot or space, or a file named like a device, is read as itself and not as another
+    file or a device (`.` and `..` in a path are resolved first, so relative paths such as
+    `--cache ..\c.sqlite` work);
+  - masked copies whose names Windows can't store safely (a `:` that would create an alternate
+    data stream, device names such as `CON`, a trailing dot or space) are not written.
+- git's hooks path is now the platform's null device on every system.
+- git also runs with `GIT_ALLOW_PROTOCOL=none`, which overrides every `protocol.*.allow` setting
+  from any configuration scope, so no transport can be used, including ones the command-line
+  settings don't name.
+- In changed-files mode, a changed file that exists but can't be examined (access denied, or a
+  sharing violation on Windows) is reported as not scanned (exit `3`); only a file deleted since
+  the diff is left out.
+- An existing report file is made private before it is emptied, so a report that can't be made
+  private is left untouched instead of truncated.
+- Rule IDs in text and CSV output are escaped like paths and previews, so a custom rule ID from
+  a scanned tree's config can't send terminal control characters or start a spreadsheet formula.
+- The build backend and its dependencies (hatchling, packaging, pathspec, pluggy, tomlkit,
+  trove-classifiers) are pinned to exact versions, because the GitHub Action builds pii-scan
+  inside jobs that may hold credentials.
+- With `--cache` on Windows, the NTFS change time is used, since `st_ctime` there is the creation
+  time: an edited file whose old modification time was restored is no longer served from the
+  cache.
+
+### Fixed
+
+- `--same-filesystem` on Windows no longer skips every subfolder (directory entries report a
+  device number of 0 there).
+- `--report /dev/null` (or `NUL`) works again.
+
+### Added
+
+- Windows support (see [Scanning File Shares](docs/scanning-shares.md#windows)), with a Windows
+  CI job. Cloud placeholders (OneDrive online-only files and folders, offline or
+  recall-on-access files, and iCloud Drive dataless files on macOS) are reported as not scanned
+  (`offline_placeholder`) instead of being downloaded during a scan.
+
 ## [1.1.1] - 2026-10-21
 
 ### Security
@@ -19,8 +85,9 @@ All notable changes to this project are documented here. The format follows
   scanned files inside submodules, so results don't change.
 - **git never fetches or uses a transport.** In a partial clone, repository config could allow the
   `ext::` transport, and the on-demand fetch of a missing object during the diff then ran the
-  command in the remote URL, with or without `--trust-repo`. Every transport is now disabled on
-  the command line (where repository config can't re-enable it), on-demand fetching is off
+  command in the remote URL, with or without `--trust-repo`. The `ext`, `file`, `git`, `ssh`,
+  `http`, and `https` transports, and the `protocol.allow` default, are now set to `never` on the
+  command line (where repository config can't re-enable them), on-demand fetching is off
   (`GIT_NO_LAZY_FETCH`), and repository config that sets `protocol.*`, `core.gitProxy`, or a
   remote's `uploadpack`/`receivepack` is refused without `--trust-repo`. A partial clone missing an
   object the diff needs now stops the scan (exit `2`) instead of fetching it.

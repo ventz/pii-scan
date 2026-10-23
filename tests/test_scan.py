@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -10,7 +11,7 @@ from pii_scan.detectors.regex import BUILTIN_RULES, RegexDetector
 from pii_scan.sources.base import ReadError
 from pii_scan.sources.fs import read_regular_file
 
-from .conftest import SAMPLE, git
+from .conftest import SAMPLE, assert_private, git
 
 
 def run(*args: str) -> int:
@@ -94,6 +95,7 @@ def test_fail_on_never_and_text_output(tree: Path, capsys):
     assert "hr/people.txt:3:6: CRITICAL SSN (regex 1.00): [SSN, 11 chars]" in out
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="chmod can't make a file unreadable on Windows")
 def test_unreadable_file_makes_scan_incomplete(tree: Path, tmp_path: Path):
     if os.geteuid() == 0:
         pytest.skip("root can read everything")
@@ -122,7 +124,7 @@ def test_masking_inline_and_from_report(tree: Path, tmp_path: Path):
     assert (out / "hr" / "wide.txt").read_bytes() == "﻿SSN [SSN]\n".encode("utf-16")
     assert (out / "clean.txt").read_text() == "nothing to see here\n"
     assert not (out / "image.bin").exists() and not (out / "link.txt").exists()
-    assert oct((out / "hr" / "people.txt").stat().st_mode & 0o777) == "0o600"
+    assert_private(out / "hr" / "people.txt", 0o600)
 
     out2 = tmp_path / "masked2"
     assert main(["mask", "--from", str(report), "--out", str(out2), "-q"]) == 0

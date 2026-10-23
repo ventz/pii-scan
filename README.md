@@ -53,8 +53,14 @@ curl -sO https://raw.githubusercontent.com/ventz/pii-scan/main/sample_testing_da
 pii-scan --all sample_testing_data.txt
 ```
 
-Requires Python 3.11+, [uv](https://docs.astral.sh/uv/), and git 2.26+ for changed-files mode. For pip, running from a checkout,
-and AWS setup, see [Getting Started](docs/getting-started.md).
+Requires Python 3.11+, [uv](https://docs.astral.sh/uv/), and git 2.26+ for changed-files mode. Runs on Linux, macOS,
+and Windows (new in 1.2.0; see [Scanning Shares](docs/scanning-shares.md#windows) for Windows notes). For pip,
+running from a checkout, and AWS setup, see [Getting Started](docs/getting-started.md).
+
+Cloud placeholders whose data isn't on the machine (iCloud Drive "dataless" files on macOS,
+OneDrive online-only files on Windows) are reported as not scanned instead of being downloaded.
+Since 1.2.0 this includes iCloud files that earlier versions downloaded and scanned; make them
+available offline first (`brctl download <path>`). See the [Changelog](CHANGELOG.md).
 
 ## Examples
 
@@ -104,7 +110,7 @@ pii-scan doctor --layers contains,detect --region us-east-1
   preserving encoding and line endings ([Masking](docs/masking.md)).
 - **Built for scale**: streaming pipeline with bounded memory, per-API rate limiting, a resume
   cache, and JSONL output ([Scanning file shares](docs/scanning-shares.md)).
-- **Safe on untrusted data**: never follows symlinks or opens FIFOs, bounded reads, hardened
+- **Safe on untrusted data**: never follows symlinks or junctions or opens FIFOs, bounded reads, hardened
   git, no values in logs ([Security](SECURITY.md)).
 - **CI-ready**: changed-files mode, `--fail-on` severity policy, baselines, SARIF, GitHub
   annotations and job summaries ([GitHub Action](docs/github-action.md)).

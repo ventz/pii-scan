@@ -19,13 +19,21 @@ around; a violation of any of them is a security bug.
   in CI and never uses the cache.
 - **Fail closed.** A file that was not fully analyzed is never reported clean and never written
   to a masked output tree.
-- **Reports are private.** Files written with `--report` and masked copies are created with mode
-  `0600`; directories created for masked output use `0700`.
+- **Reports are private.** Files written with `--report`, the cache, baselines, and masked copies
+  are created with mode `0600`; directories created for masked output use `0700`. On Windows they
+  get a protected ACL for the current user and SYSTEM only, before any data is written. One
+  exception: SQLite creates the cache's `-wal` and `-shm` side files itself, with the permissions
+  of their folder, and pii-scan restricts them right after it opens the cache. Keep the cache in a
+  folder only you can read (one pii-scan creates is private).
 - **Masking is non-destructive.** Masked copies go to a separate directory that must not overlap
   the scanned tree. Writes are atomic and never follow a symlink. Originals are never modified.
-- **Untrusted files are handled defensively.** Symlinks, FIFOs, sockets, and devices are skipped
+- **Untrusted files are handled defensively.** Symlinks (and on Windows junctions), FIFOs, sockets, and devices are skipped
   without being opened; reads are bounded by `max_file_size`, and each opened file is verified to
-  still be under the scan root (so a parent directory swapped for a symlink mid-scan is refused).
+  still be under the scan root (so a parent directory swapped for a symlink or junction mid-scan is
+  refused). That check needs the real path of an open file, which pii-scan gets on Linux (from
+  `/proc`), macOS, and Windows; elsewhere (for example the BSDs, or Linux without `/proc`) it is
+  skipped, and only the final path component is protected against links. Cloud placeholders (OneDrive online-only files, iCloud Drive dataless files) are
+  reported as not scanned rather than downloaded.
   Built-in regex rules avoid catastrophic backtracking. A file where one rule exceeds the match cap
   is reported as not scanned rather than partially reported or masked.
 - **Git is invoked defensively.** `core.fsmonitor`, hooks, and external diff drivers are disabled,

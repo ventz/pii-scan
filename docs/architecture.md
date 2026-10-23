@@ -42,7 +42,7 @@ Queues are bounded, so memory use is flat regardless of how many files a run cov
 | Module | Responsibility |
 |--------|----------------|
 | `sources/fs.py` | Directory walk with `os.scandir`, excludes, loop and mount guards; hardened bounded reads |
-| `sources/git.py` | Changed files from git with hooks, fsmonitor, and external diff disabled |
+| `sources/git.py` | Changed files from git with hooks, fsmonitor, external diff, submodules, and transports disabled |
 | `sniff.py` | Text or binary decision, encoding detection, lossless decode and re-encode |
 | `chunking.py` | Byte-bounded overlapping chunks, API-safe text, line and column mapping |
 | `detectors/regex.py` | Built-in and custom rules, validators, keyword prefilter |
@@ -50,6 +50,7 @@ Queues are bounded, so memory use is flat regardless of how many files a run cov
 | `layers.py` | Chains AWS layers across chunks |
 | `spans.py` | Deduplicates findings and merges overlaps |
 | `masking.py` | Replacement styles, fingerprints, previews, atomic writes |
+| `private.py`, `winapi.py` | Owner-only files, link and cloud-placeholder detection, Windows names; Win32 ACLs and no-follow opens |
 | `pipeline.py` | Threads, queues, per-file processing, summary |
 | `sinks.py`, `console.py` | Machine-readable outputs; human output on stderr |
 | `state.py` | Resume cache and baselines |

@@ -13,7 +13,7 @@ from pii_scan.pipeline import Scanner, Summary
 from pii_scan.sinks import JsonlSink
 from pii_scan.sniff import decode, detect_encoding, encode_like
 
-from .conftest import SAMPLE, git
+from .conftest import SAMPLE, assert_private, git, requires_symlinks
 
 
 def run(*args: str) -> int:
@@ -98,6 +98,7 @@ def test_invalid_rate_flag_exits_2(tree: Path):
     assert run("--all", str(tree), "--max-tps-detect", "0") == 2
 
 
+@requires_symlinks
 def test_git_mode_skips_symlinks_and_submodule_like_dirs(tmp_path: Path):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -160,7 +161,8 @@ def test_baseline_matches_between_all_and_changed_modes(tmp_path: Path, monkeypa
 def test_masked_directories_are_private(tree: Path, tmp_path: Path):
     out = tmp_path / "masked"
     run("--all", str(tree), "--mask-out", str(out), "--fail-on", "never")
-    assert oct((out / "hr").stat().st_mode & 0o777) == "0o700"
+    assert_private(out, 0o700)
+    assert_private(out / "hr", 0o700)
 
 
 def test_cp1252_roundtrip_with_undefined_byte():

@@ -60,8 +60,8 @@ class TextSink:
         path = display_path(r)
         for f in r.findings:
             self.stream.write(
-                f"{path}:{f.line}:{f.column}: {str(f.severity).upper()} {f.type} "
-                f"({f.detector} {f.score:.2f}): {clean(f.preview)}\n"
+                f"{path}:{f.line}:{f.column}: {str(f.severity).upper()} {clean(f.type)} "
+                f"({clean(f.detector)} {f.score:.2f}): {clean(f.preview)}\n"
             )
 
     def close(self, summary: Summary) -> None:
@@ -131,9 +131,9 @@ class CsvSink:
 
     def file(self, r: FileResult) -> None:
         for f in r.findings:
-            self.writer.writerow([_cell(json_safe(r.relpath or r.path)), f.line, f.column, str(f.severity), f.type,
-                                  f.detector, f"{f.score:.2f}", _cell(f.rule), _cell(f.preview),
-                                  f.fingerprint])  # fmt: skip
+            self.writer.writerow([_cell(json_safe(r.relpath or r.path)), f.line, f.column, str(f.severity),
+                                  _cell(f.type), _cell(f.detector), f"{f.score:.2f}", _cell(f.rule),
+                                  _cell(f.preview), f.fingerprint])  # fmt: skip
 
     def close(self, summary: Summary) -> None:
         self.stream.flush()

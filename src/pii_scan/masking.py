@@ -7,12 +7,12 @@ import hashlib
 import hmac
 import os
 import secrets
-import tempfile
 from collections.abc import Iterable
 from enum import StrEnum
 from pathlib import Path
 
 from .models import Span
+from .private import WINDOWS, create_private_file, is_link, make_private_dirs, windows_name_problem
 from .spans import MergedSpan
 
 
@@ -98,34 +98,31 @@ def preview(value: str, entity_type: str, *, reveal: bool = False) -> str:
 
 
 def write_atomic(dest: Path, data: bytes, *, mode: int = 0o600) -> None:
-    """Write via a same-directory temp file, fsync, then rename. Never follows a symlink at dest."""
-    _make_private_dirs(dest.parent)
-    if dest.is_symlink():
-        raise OSError(f"refusing to write through symlink: {dest}")
-    fd, tmp = tempfile.mkstemp(prefix=".pii-scan-", dir=dest.parent)
+    """Write via a same-directory temp file, fsync, then rename. Never follows a link at dest.
+
+    The temp file is made owner-only before any data is written; the rename keeps that.
+    """
+    make_private_dirs(dest.parent)
+    with contextlib.suppress(FileNotFoundError):
+        if is_link(os.lstat(dest)):
+            raise OSError(f"refusing to write through a symlink or junction: {dest}")
+    while True:
+        tmp = str(dest.parent / f".pii-scan-{secrets.token_hex(8)}")
+        try:
+            fd = create_private_file(tmp, mode)  # private before any data is written
+            break
+        except FileExistsError:
+            continue
     try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)
             fh.flush()
             os.fsync(fh.fileno())
-        os.chmod(tmp, mode)
         os.replace(tmp, dest)
     except BaseException:
         with contextlib.suppress(FileNotFoundError):
             os.unlink(tmp)
         raise
-
-
-def _make_private_dirs(path: Path) -> None:
-    """Create every missing directory with mode 0700 (mkdir(parents=True) only applies it to the last)."""
-    missing: list[Path] = []
-    p = path
-    while not p.exists():
-        missing.append(p)
-        p = p.parent
-    for d in reversed(missing):
-        with contextlib.suppress(FileExistsError):
-            d.mkdir(mode=0o700)
 
 
 def safe_output_path(out_root: Path, relpath: str) -> Path:
@@ -137,6 +134,11 @@ def safe_output_path(out_root: Path, relpath: str) -> Path:
     norm = os.path.normpath(relpath)
     if os.path.isabs(norm) or norm == os.pardir or norm.startswith(os.pardir + os.sep):
         raise ValueError(f"output path escapes output directory: {relpath}")
+    if WINDOWS:
+        for part in Path(norm).parts:
+            problem = windows_name_problem(part)
+            if problem:
+                raise ValueError(f"output path component {part!r} {problem}: {relpath}")
     candidate = root / norm
     existing = candidate.parent
     while not existing.exists():

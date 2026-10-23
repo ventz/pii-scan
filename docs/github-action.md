@@ -32,7 +32,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0 # the diff base must be available
-      - uses: ventz/pii-scan@v1.1.0
+      - uses: ventz/pii-scan@v1.2.0
         with:
           fail-on: high
 ```
@@ -51,7 +51,7 @@ steps:
   - uses: actions/checkout@v7
     with:
       fetch-depth: 0
-  - uses: ventz/pii-scan@v1.1.0
+  - uses: ventz/pii-scan@v1.2.0
     with:
       upload-sarif: true
 ```
@@ -78,7 +78,7 @@ steps:
     with:
       role-to-assume: arn:aws:iam::123456789012:role/pii-scan-github
       aws-region: us-east-1
-  - uses: ventz/pii-scan@v1.1.0
+  - uses: ventz/pii-scan@v1.2.0
     with:
       layers: regex,contains,detect
       aws-region: us-east-1
@@ -167,12 +167,14 @@ pushes to `main`; widen the `sub` condition deliberately, for example to a prote
 
 ## Notes
 
-- **Pin the action.** Use a release tag (`@v1.1.0`) or, for the strongest guarantee, a full commit SHA.
+- **Pin the action.** Use a release tag (`@v1.2.0`) or, for the strongest guarantee, a full commit SHA.
 - **Policy lives in the workflow.** A pull request can edit files in its own tree, including the
   files passed as `config-file` and `custom-regex-file`. The action runs with
   `--restricted-config`, so those files can only add rules or raise severities; attempts to lower
   severities, add excludes, change limits, or change AWS settings stop the run. Custom rules must
-  use RE2 syntax (no lookarounds or backreferences), so a rule can't hang the job. Keep `fail-on` and
+  use RE2 syntax (no lookarounds or backreferences), so a rule can't hang the job, and the
+  `custom-regex-file` must be inside the working directory (the workspace): a rules file written
+  to `$RUNNER_TEMP` or another directory outside it stops the run (exit `2`). Keep `fail-on` and
   `layers` as workflow inputs.
 - **Cost ceiling.** The action has no input for `--aws-max-chars`, and a restricted config can't
   set AWS options. For scheduled full scans with AWS layers, run pii-scan directly in a workflow

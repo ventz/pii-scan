@@ -22,6 +22,36 @@
 - **Start regex-only.** It is free and sends nothing anywhere. Add AWS layers after you have seen
   the regex results and estimated cost ([Detection Layers](detection-layers.md)).
 
+## Windows
+
+pii-scan applies the same protections on Windows as on Linux and macOS, through Windows' own
+mechanisms:
+
+- **Links.** Symlinks, junctions, and other name-surrogate reparse points are skipped (`symlink`),
+  and each opened file is checked to still be under the scan root, so a folder swapped for a
+  junction mid-scan is refused (`outside_root`). Deduplicated files on Windows Server are reparse
+  points too, but they hold real data and are read normally.
+- **Cloud placeholders.** OneDrive "online-only" files and folders, and other offline or
+  recall-on-access files, are reported as not scanned (`offline_placeholder`) instead of being
+  downloaded during the scan. The same applies to iCloud Drive placeholders on macOS.
+- **Private output.** Reports, the cache, baselines, and masked copies get an ACL that grants
+  access only to the current user and SYSTEM, with nothing inherited from the parent folder (the
+  equivalent of modes 0600 and 0700).
+- **Names Windows can't store.** A masked copy whose name contains `:` (which would create an
+  alternate data stream), is a device name such as `CON` or `NUL`, or ends in a dot or space is
+  not written (`mask_failed`), since it would land somewhere else. This matters when masking a
+  share created on Linux or macOS.
+- **Exact names.** Files are opened by their exact name, so `report.` and `report` are different
+  files and a file called `NUL` is read as a file, as they are on the server.
+- **Resume cache.** With `--cache`, a file's NTFS change time is read too (Windows' `st_ctime` is
+  its creation time), so an edit with the old modification time restored is still rescanned.
+- **DFS and mounted volumes.** Files behind a DFS link that points to another server may
+  resolve outside the scan root and be reported as `outside_root`; scan the target share
+  directly instead. A volume mounted into a folder uses the same kind of reparse point as a
+  junction, so that folder is skipped (`symlink`); scan the volume by its own drive letter or
+  path.
+- **Coverage limits.** Alternate data streams are not scanned (only a file's main stream is).
+
 ## A production-style run
 
 ```bash
@@ -85,8 +115,10 @@ Skipped: binary 88,120, symlink 2,901, extension 529
 - **Not scanned** files need attention: permissions (`open_failed`), size (`too_large`, raise
   `--max-file-size`), encoding (`undecodable`), one rule matching more than
   `max_matches_per_rule` times (`match_limit`, raise it in the configuration), or a path that
-  resolved outside the scan root (`outside_root`, investigate). The first examples are listed; the JSONL report
-  has every one (`"status": "not_scanned"`).
+  resolved outside the scan root (`outside_root`, investigate), or a cloud placeholder whose data
+  isn't on the machine (`offline_placeholder`; make the files available offline first, for example
+  OneDrive's "Always keep on this device" or `brctl download` for iCloud Drive). The first
+  examples are listed; the JSONL report has every one (`"status": "not_scanned"`).
 - **Skipped** files were excluded on purpose. `binary` includes PDF and Office documents, which
   are not extracted yet ([roadmap](architecture.md#roadmap)).
 

@@ -5,16 +5,16 @@ from __future__ import annotations
 import os
 import stat
 import subprocess
-import sys
 from collections.abc import Iterator
 from pathlib import Path
 
+from ..private import WINDOWS, extended_path, is_gone, is_link, is_placeholder, is_under
 from .base import FileRef, ReadError
-from .fs import Excludes, read_regular_file
+from .fs import Excludes, change_marker, read_regular_file
 
 _HARDENING = [
     "-c", "core.fsmonitor=false",
-    "-c", "core.hooksPath=/dev/null",
+    "-c", f"core.hooksPath={os.devnull}",  # "nul" on Windows, where /dev/null would mean C:\dev\null
     "-c", "core.quotePath=false",
     "-c", "diff.external=",
     # No network or transport, ever: repository config could otherwise allow "ext::" (which runs a
@@ -49,7 +49,7 @@ def _git_executable(repo: Path) -> str:
     could run a git.exe committed to it. Relative PATH entries ("" or ".") are skipped for the
     same reason.
     """
-    names = ("git.exe",) if sys.platform == "win32" else ("git",)
+    names = ("git.exe",) if WINDOWS else ("git",)
     inside = os.path.realpath(repo)
     for d in os.environ.get("PATH", "").split(os.pathsep):
         if not d or not os.path.isabs(d):
@@ -57,8 +57,7 @@ def _git_executable(repo: Path) -> str:
         for name in names:
             candidate = os.path.join(d, name)
             if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-                real = os.path.realpath(candidate)
-                if real == inside or real.startswith(inside.rstrip(os.sep) + os.sep):
+                if is_under(os.path.realpath(candidate), inside):
                     continue
                 return candidate
     raise GitError("git is not installed (no git executable on an absolute PATH entry)")
@@ -69,6 +68,9 @@ def _git(cwd: Path, *args: str) -> bytes:
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GIT_NO_LAZY_FETCH"] = "1"  # never fetch missing objects (git 2.44+)
     env["GIT_PROTOCOL_FROM_USER"] = "0"
+    # Allow-list of transports that overrides every protocol.*.allow setting, from any config scope
+    # and on any git version: "none" names no real transport, so all of them are refused.
+    env["GIT_ALLOW_PROTOCOL"] = "none"
     try:
         proc = subprocess.run(
             [_git_executable(cwd), *_HARDENING, *args], cwd=cwd, env=env, stdin=subprocess.DEVNULL,
@@ -163,7 +165,8 @@ def _check_layout(top: Path) -> None:
 
 class GitChangedSource:
     def __init__(self, path: Path, base: str | None, excludes: Excludes, *, max_file_size: int,
-                 trust_repo: bool = False) -> None:  # fmt: skip
+                 trust_repo: bool = False, precise_change_time: bool = False) -> None:  # fmt: skip
+        self.precise_change_time = precise_change_time
         self.path = path.resolve()
         cwd = self.path if self.path.is_dir() else self.path.parent
         self.top = Path(_git(cwd, "rev-parse", "--show-toplevel").decode().strip()).resolve()
@@ -204,16 +207,31 @@ class GitChangedSource:
                 continue
             reason = self.excludes.file_excluded(name, rel)
             try:
-                st = full.lstat()
-            except FileNotFoundError:
+                # Windows: the exact name, since Win32 would drop a trailing dot or space
+                st = os.lstat(extended_path(str(full), os.getcwd())) if WINDOWS else full.lstat()
+            except OSError as exc:
+                if is_gone(exc):
+                    continue  # deleted since the diff
+                yield FileRef(str(full), rel, error=f"stat: {exc.strerror or exc}", source="git")
                 continue
-            if stat.S_ISLNK(st.st_mode):
+            if is_link(st):
                 reason = "symlink"
             elif not stat.S_ISREG(st.st_mode):  # submodules, nested repositories, special files
                 reason = "not a regular file"
-            changed = max(st.st_mtime_ns, st.st_ctime_ns)
+            try:
+                changed = change_marker(str(full), st, self.precise_change_time and not reason)
+            except OSError as exc:
+                # Only a file deleted since the diff may drop out. Anything else (access denied, a
+                # sharing violation) must count as not scanned, or a changed file could pass unread.
+                if is_gone(exc):
+                    continue
+                yield FileRef(str(full), rel, st.st_size, error=f"stat: {exc.strerror or exc}", source="git")
+                continue
             if reason:
                 yield FileRef(str(full), rel, st.st_size, changed, excluded=reason, source="git")
+            elif is_placeholder(st):
+                yield FileRef(str(full), rel, st.st_size, changed,
+                              error="offline_placeholder: data is not stored locally", source="git")  # fmt: skip
             elif st.st_size > self.max_file_size:
                 yield FileRef(str(full), rel, st.st_size, changed,
                               error=f"too_large: {st.st_size} bytes", source="git")  # fmt: skip

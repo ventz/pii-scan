@@ -84,7 +84,10 @@ rare but possible across very large estates: treat them as pseudonyms, not uniqu
   Undecodable bytes in UTF-8 and Windows-1252 files survive unchanged; invalid sequences in UTF-16
   and UTF-32 files are replaced.
 - **Safe writes.** The output directory must not overlap the scanned paths. Files are written
-  atomically through a temporary file, with mode `0600`, and never through a symlink.
+  atomically through a temporary file, with mode `0600` (directories `0700`; on Windows an ACL for
+  the current user and SYSTEM only), and never through a symlink or junction. On Windows, a name
+  that can't be stored safely (containing `:`, a device name such as `CON`, or a trailing dot or
+  space) is reported as `mask_failed` instead of being written somewhere else.
 
 ## Limitations
 

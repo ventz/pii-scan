@@ -1,5 +1,6 @@
 """Regression tests for the pre-release security audit."""
 
+import importlib.util
 import json
 import os
 import time
@@ -14,7 +15,7 @@ from pii_scan.sniff import decode, detect_encoding, encode_like
 from pii_scan.sources.base import ReadError
 from pii_scan.sources.fs import read_regular_file
 
-from .conftest import git
+from .conftest import git, requires_symlinks
 
 KEY = "0123456789abcdef-test-key"
 
@@ -50,6 +51,7 @@ def test_restricted_config_allows_raising(tree: Path, tmp_path: Path):
     assert run("--all", str(tree), "--config", str(cfg), "--restricted-config", "--fail-on", "critical") == 1
 
 
+@pytest.mark.skipif(importlib.util.find_spec("re2") is None, reason="restricted custom rules need google-re2")
 def test_restricted_custom_rule_cannot_downgrade(tree: Path, tmp_path: Path, monkeypatch):
     monkeypatch.chdir(tmp_path)  # untrusted rules files must be under the working directory
     rules = tmp_path / "r.json"
@@ -69,7 +71,7 @@ def test_git_mode_refuses_repo_with_clean_filter(tmp_path: Path):
     git(repo, "add", ".")
     git(repo, "commit", "-q", "-m", "base")
     marker = tmp_path / "pwned"
-    git(repo, "config", "filter.x.clean", f"touch {marker}")
+    git(repo, "config", "filter.x.clean", f"touch '{marker.as_posix()}'")
     (repo / ".gitattributes").write_text("* filter=x\n")
     assert run(str(repo), "--base", "main") == 2
     assert not marker.exists()
@@ -89,6 +91,7 @@ def test_git_mode_allows_standard_lfs_config(tmp_path: Path):
 # --- filesystem --------------------------------------------------------------------------------
 
 
+@requires_symlinks
 def test_read_refuses_file_outside_root(tmp_path: Path):
     inside, outside = tmp_path / "share", tmp_path / "secret"
     inside.mkdir()
@@ -100,6 +103,7 @@ def test_read_refuses_file_outside_root(tmp_path: Path):
     assert exc.value.reason == "outside_root"
 
 
+@requires_symlinks
 def test_report_symlink_is_refused(tree: Path, tmp_path: Path):
     victim = tmp_path / "victim.txt"
     victim.write_text("keep me\n")
@@ -109,6 +113,7 @@ def test_report_symlink_is_refused(tree: Path, tmp_path: Path):
     assert victim.read_text() == "keep me\n"
 
 
+@requires_symlinks
 def test_output_path_symlinked_parent_is_refused(tmp_path: Path):
     out, elsewhere = tmp_path / "out", tmp_path / "elsewhere"
     out.mkdir()

@@ -1,6 +1,6 @@
 [project]
 name = "pii-scan"
-version = "1.1.1"
+version = "1.2.0"
 description = "Fast, fail-closed scanner that finds and masks PII and secrets across files, repositories, and file shares using regex validators and AWS Comprehend."
 readme = "README.md"
 license = "MIT"
@@ -37,12 +37,21 @@ dev = [
 ]
 
 [build-system]
-requires = ["hatchling>=1.27"]
+requires = ["hatchling==1.32.0"]
 build-backend = "hatchling.build"
 
 [tool.uv]
-# Pin the build backend: the GitHub Action builds this project inside jobs that may hold credentials.
-build-constraint-dependencies = ["hatchling==1.32.0"]
+# Pin the build backend and everything it imports: the GitHub Action builds this project inside
+# jobs that may hold credentials, so no build dependency may resolve to a newer release at run time.
+# Update together (uv pip compile of hatchling==<version>).
+build-constraint-dependencies = [
+    "hatchling==1.32.0",
+    "packaging==26.3",
+    "pathspec==1.1.1",
+    "pluggy==1.7.0",
+    "tomlkit==0.15.2",
+    "trove-classifiers==2026.9.21.13",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/pii_scan"]

@@ -10,6 +10,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from .models import FileResult, Finding, Severity, Status
+from .private import create_private_file, make_private, make_private_dirs
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS files (
@@ -55,7 +56,12 @@ class ResultCache:
     def __init__(self, path: Path, config_hash: str) -> None:
         self.path = path
         self.config_hash = config_hash
-        path.parent.mkdir(parents=True, exist_ok=True)
+        # The database is created owner-only before SQLite writes anything. SQLite creates -wal and
+        # -shm itself: on Windows they inherit the folder's ACL (private only if pii-scan created
+        # the folder) until make_private below, when they hold no more than the schema.
+        make_private_dirs(path.parent)
+        if not path.exists():
+            os.close(create_private_file(path, 0o600))
         self._local = threading.local()
         conn = self._conn()
         conn.executescript(_SCHEMA)
@@ -63,7 +69,7 @@ class ResultCache:
         for suffix in ("", "-wal", "-shm"):  # results reveal where sensitive data lives: owner-only
             p = Path(f"{path}{suffix}")
             if p.exists():
-                os.chmod(p, 0o600)
+                make_private(p, 0o600)
         self._pending = 0
 
     def _conn(self) -> sqlite3.Connection:

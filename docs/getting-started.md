@@ -24,6 +24,10 @@ uv sync
 uv run pii-scan --version        # or ./pii_scan --version
 ```
 
+On Windows, install uv with `winget install astral-sh.uv` (or the PowerShell installer on the uv
+site); the commands above then work the same in PowerShell. Windows specifics are in
+[Scanning Shares](scanning-shares.md#windows).
+
 ## 2. Run a first scan
 
 The repository ships `sample_testing_data.txt`, which contains only synthetic values.

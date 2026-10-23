@@ -226,7 +226,7 @@ def test_git_mode_refuses_filter_in_linked_worktree_config(tmp_path: Path):
     git(main_repo, "worktree", "add", "-q", str(worktree), "-b", "feature")
     marker = tmp_path / "pwned"
     git(worktree, "config", "extensions.worktreeConfig", "true")
-    git(worktree, "config", "--worktree", "filter.x.clean", f"touch {marker}; cat")
+    git(worktree, "config", "--worktree", "filter.x.clean", f"touch '{marker.as_posix()}'; cat")
     (worktree / ".gitattributes").write_text("* filter=x\n")
     (worktree / "b.txt").write_text("changed\n")
     assert run(str(worktree), "--base", "main") == 2
@@ -251,7 +251,7 @@ def test_git_mode_never_runs_a_submodule_filter(tmp_path: Path, trust: bool):
     marker = tmp_path / "pwned"
     # The submodule's own config is not repository config of the parent, so only skipping
     # submodules keeps git from running this filter while it checks whether "lib" changed.
-    git(parent / "lib", "config", "filter.x.clean", f"touch {marker}; cat")
+    git(parent / "lib", "config", "filter.x.clean", f"touch '{marker.as_posix()}'; cat")
     (parent / "lib" / ".gitattributes").write_text("* filter=x\n")
     (parent / "lib" / "f.txt").write_text("v2\n")  # same size: git must hash it, which runs the filter
     (parent / "b.txt").write_text("new\n")
@@ -260,6 +260,7 @@ def test_git_mode_never_runs_a_submodule_filter(tmp_path: Path, trust: bool):
     assert not marker.exists()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="a shell-script git only runs on POSIX")
 def test_git_from_relative_path_entry_is_never_run(tmp_path: Path, monkeypatch):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -275,6 +276,22 @@ def test_git_from_relative_path_entry_is_never_run(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("PATH", os.pathsep.join([".", os.environ["PATH"]]))
     run(".", "--base", "main", "--fail-on", "never")
     assert not marker.exists()
+
+
+def test_git_is_never_taken_from_the_repository(tmp_path: Path, monkeypatch):
+    from pii_scan.sources.git import _git_executable
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    fake = repo / ("git.exe" if sys.platform == "win32" else "git")
+    fake.write_bytes(b"")
+    fake.chmod(0o755)
+    real = _git_executable(repo)
+    monkeypatch.setenv("PATH", os.pathsep.join([".", str(repo), os.environ["PATH"]]))
+    monkeypatch.chdir(repo)
+    found = _git_executable(repo)
+    assert Path(found).resolve() != fake.resolve()
+    assert Path(found).resolve() == Path(real).resolve()
 
 
 def test_git_mode_ignores_operator_global_config(tmp_path: Path, monkeypatch):
@@ -389,11 +406,11 @@ def test_git_mode_never_fetches_missing_objects(tmp_path: Path, trust: bool):
     (origin / "f.txt").write_text("v2\n")
     git(origin, "commit", "-q", "-am", "two")
     git(origin, "config", "uploadpack.allowFilter", "true")
-    git(tmp_path, "clone", "-q", "--filter=blob:none", "--no-checkout", f"file://{origin}", str(clone))
+    git(tmp_path, "clone", "-q", "--filter=blob:none", "--no-checkout", origin.as_uri(), str(clone))
     git(clone, "-c", "protocol.file.allow=always", "checkout", "-q", "main")
     marker = tmp_path / "pwned"
     git(clone, "config", "protocol.ext.allow", "always")
-    git(clone, "config", "remote.origin.url", f"ext::sh -c touch% {marker}")
+    git(clone, "config", "remote.origin.url", f"ext::sh -c touch% {marker.as_posix()}")
     (clone / "f.txt").write_text("local\n")
     args = [str(clone), "--base", "HEAD~1", "--fail-on", "never"] + (["--trust-repo"] if trust else [])
     assert run(*args) == 2  # refused (repository config) or incomplete enumeration: never silently clean
@@ -407,7 +424,7 @@ def test_git_mode_refuses_directory_laid_out_like_a_bare_repository(tmp_path: Pa
     marker = tmp_path / "pwned"
     git(tree, "config", "core.bare", "false")
     git(tree, "config", "core.worktree", ".")
-    git(tree, "config", "filter.x.clean", f"touch {marker}; cat")
+    git(tree, "config", "filter.x.clean", f"touch '{marker.as_posix()}'; cat")
     (tree / ".gitattributes").write_text("* filter=x\n")
     (tree / "notes.txt").write_text("hello\n")
     for trust in ([], ["--trust-repo"]):

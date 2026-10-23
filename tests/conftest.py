@@ -1,5 +1,9 @@
+import functools
 import os
+import re
 import subprocess
+import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -37,10 +41,69 @@ def tree(tmp_path: Path) -> Path:
     (root / "node_modules" / "dep.txt").write_text(SAMPLE, encoding="utf-8")
     outside = tmp_path / "outside-secret.txt"
     outside.write_text("aws_access_key_id = AKIAIOSFODNN7EXAMPLE\n", encoding="utf-8")
-    (root / "link.txt").symlink_to(outside)
+    if can_symlink():
+        (root / "link.txt").symlink_to(outside)
     if hasattr(os, "mkfifo"):
         os.mkfifo(root / "pipe")
     return root
+
+
+@functools.cache
+def can_symlink() -> bool:
+    """Windows needs Developer Mode or admin rights to create symlinks."""
+    if sys.platform != "win32":
+        return True
+    probe = Path(tempfile.mkdtemp()) / "probe"
+    try:
+        probe.symlink_to(probe.parent)
+        return True
+    except OSError:
+        return False
+
+
+requires_symlinks = pytest.mark.skipif(not can_symlink(), reason="symlinks need Developer Mode or admin on Windows")
+
+
+def assert_private(path: Path, mode: int) -> None:
+    """Owner-only: the POSIX mode bits, or on Windows a protected ACL for the user and SYSTEM only."""
+    if sys.platform != "win32":
+        assert oct(path.stat().st_mode & 0o777) == oct(mode), path
+        return
+    from pii_scan.winapi import dacl_sddl, private_sddl
+
+    expected_sddl = canonical_sddl(private_sddl(directory=path.is_dir()))
+    actual, expected = _parse_dacl(dacl_sddl(str(path))), _parse_dacl(expected_sddl)
+    assert "P" in actual[0], (path, actual)  # protected: nothing inherited from the parent
+    assert actual[1] == expected[1], (path, actual)
+
+
+def canonical_sddl(sddl: str) -> str:
+    """`sddl` as Windows writes it back (a SID may come back as an alias such as LA)."""
+    import ctypes
+    from ctypes import wintypes
+
+    from pii_scan import winapi
+
+    descriptor = ctypes.c_void_p()
+    assert winapi._advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        sddl, 1, ctypes.byref(descriptor), None)
+    try:
+        text = wintypes.LPWSTR()
+        assert winapi._advapi32.ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            descriptor, 1, 0x4, ctypes.byref(text), None)
+        try:
+            return text.value
+        finally:
+            winapi._kernel32.LocalFree(text)
+    finally:
+        winapi._kernel32.LocalFree(descriptor)
+
+
+def _parse_dacl(sddl: str) -> tuple[str, frozenset[str]]:
+    """("PAI", {"A;;FA;;;S-1-5-...", ...}): Windows may add flags such as AI when reading an ACL back."""
+    m = re.fullmatch(r"D:([A-Z]*)((?:\([^)]*\))*)", sddl)
+    assert m, sddl
+    return m.group(1), frozenset(re.findall(r"\(([^)]*)\)", m.group(2)))
 
 
 def git(cwd: Path, *args: str) -> str:
