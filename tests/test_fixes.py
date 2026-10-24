@@ -21,7 +21,7 @@ def run(*args: str) -> int:
 
 
 def records(path: Path) -> list[dict]:
-    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
 def test_mask_from_refuses_output_over_scanned_tree(tree: Path, tmp_path: Path):
@@ -64,7 +64,7 @@ def test_write_baseline_keeps_already_accepted_entries(tree: Path, tmp_path: Pat
     b1, b2 = tmp_path / "b1.json", tmp_path / "b2.json"
     run("--all", str(tree), "--write-baseline", str(b1))
     run("--all", str(tree), "--baseline", str(b1), "--write-baseline", str(b2))
-    assert json.loads(b1.read_text()) == json.loads(b2.read_text())
+    assert json.loads(b1.read_text(encoding="utf-8")) == json.loads(b2.read_text(encoding="utf-8"))
 
 
 def test_cache_stores_findings_before_baseline(tree: Path, tmp_path: Path, monkeypatch):

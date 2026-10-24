@@ -129,7 +129,7 @@ def test_walk_excludes_junctions(tmp_path: Path):
     _junction(root / "jump", outside)
     report = tmp_path / "r.jsonl"
     assert run("--all", str(root), "--output", "jsonl", "--report", str(report), "--fail-on", "any") == 0
-    recs = [json.loads(line) for line in report.read_text().splitlines()]
+    recs = [json.loads(line) for line in report.read_text(encoding="utf-8").splitlines()]
     assert not any(r.get("kind") == "finding" for r in recs)
 
 
@@ -198,7 +198,7 @@ def test_placeholder_files_are_not_scanned_or_masked(tmp_path: Path, monkeypatch
     report, out = tmp_path / "r.jsonl", tmp_path / "masked"
     code = run("--all", str(root), "--output", "jsonl", "--report", str(report), "--mask-out", str(out))
     assert code == 3
-    recs = [json.loads(line) for line in report.read_text().splitlines()]
+    recs = [json.loads(line) for line in report.read_text(encoding="utf-8").splitlines()]
     summary = next(r for r in recs if r["kind"] == "summary")
     assert summary["not_scanned_reasons"] == {"offline_placeholder": 1}
     assert not (out / "cloud.txt").exists() and (out / "local.txt").exists()
@@ -265,7 +265,7 @@ def test_same_filesystem_still_descends_on_windows(tmp_path: Path):
     (root / "sub" / "a.txt").write_text(SAMPLE)
     report = tmp_path / "r.jsonl"
     run("--all", str(root), "--same-filesystem", "--output", "jsonl", "--report", str(report), "--fail-on", "never")
-    recs = [json.loads(line) for line in report.read_text().splitlines()]
+    recs = [json.loads(line) for line in report.read_text(encoding="utf-8").splitlines()]
     assert any(r["kind"] == "finding" for r in recs)
     assert not any(r.get("reason") == "different filesystem" for r in recs)
 
@@ -357,7 +357,8 @@ def test_changed_file_that_cannot_be_examined_is_not_scanned(tmp_path: Path, mon
     code = run(str(repo), "--base", "main", "--cache", str(tmp_path / "c.sqlite"), "--output", "jsonl",
                "--report", str(report))  # fmt: skip
     assert code == 3
-    summary = next(r for r in map(json.loads, report.read_text().splitlines()) if r["kind"] == "summary")
+    lines = report.read_text(encoding="utf-8").splitlines()
+    summary = next(r for r in map(json.loads, lines) if r["kind"] == "summary")
     assert summary["not_scanned_reasons"] == {"stat": 1}
 
 
@@ -459,7 +460,7 @@ def test_existing_report_is_overwritten(tree: Path, tmp_path: Path):
     report = tmp_path / "r.jsonl"
     report.write_text("x" * 100_000 + "\n")
     assert run("--all", str(tree), "--output", "jsonl", "--report", str(report), "--fail-on", "never") == 0
-    recs = [json.loads(line) for line in report.read_text().splitlines()]
+    recs = [json.loads(line) for line in report.read_text(encoding="utf-8").splitlines()]
     assert recs[-1]["kind"] == "summary"
 
 
@@ -472,7 +473,7 @@ def test_text_output_escapes_control_characters_in_rule_ids(tmp_path: Path, monk
     rules.write_text(json.dumps({"rules": [{"id": "emp\x1b[2J\r", "pattern": "EMP-[0-9]{6}"}]}))
     report = tmp_path / "r.txt"
     run("--all", str(root), "--custom-regex", str(rules), "--report", str(report), "--fail-on", "never")
-    text = report.read_text()
+    text = report.read_text(encoding="utf-8")
     assert "EMP" in text or "emp" in text
     assert "\x1b" not in text and "\r" not in text
 
@@ -500,7 +501,7 @@ def test_directory_with_trailing_dot_is_listed_exactly(tmp_path: Path):
         fh.write("ssn 123-45-6789\n")
     report = tmp_path / "r.jsonl"
     run("--all", str(root), "--output", "jsonl", "--report", str(report), "--fail-on", "never")
-    recs = [json.loads(line) for line in report.read_text().splitlines()]
+    recs = [json.loads(line) for line in report.read_text(encoding="utf-8").splitlines()]
     assert any(r["kind"] == "finding" and r["relpath"] == "dir./hidden.txt" for r in recs)
 
 
@@ -519,7 +520,7 @@ def test_github_output_says_whether_the_scan_was_complete(tmp_path: Path, monkey
     monkeypatch.setenv("GITHUB_OUTPUT", str(output))
     code = run("--all", str(root), "--github", "--max-file-size", "1000")
     assert code == (1 if "ssn" in content else 0)
-    assert output.read_text() == f"complete={expected}\n"
+    assert output.read_text(encoding="utf-8") == f"complete={expected}\n"
 
 
 def test_github_output_incomplete_even_when_allowed(tmp_path: Path, monkeypatch):
@@ -529,7 +530,7 @@ def test_github_output_incomplete_even_when_allowed(tmp_path: Path, monkeypatch)
     output = tmp_path / "github_output"
     monkeypatch.setenv("GITHUB_OUTPUT", str(output))
     assert run("--all", str(root), "--github", "--max-file-size", "1000", "--allow-incomplete") == 0
-    assert output.read_text() == "complete=false\n"
+    assert output.read_text(encoding="utf-8") == "complete=false\n"
 
 
 def test_github_output_incomplete_when_sarif_is_truncated(tmp_path: Path, monkeypatch):
@@ -540,8 +541,8 @@ def test_github_output_incomplete_when_sarif_is_truncated(tmp_path: Path, monkey
     output, report = tmp_path / "github_output", tmp_path / "r.sarif"
     monkeypatch.setenv("GITHUB_OUTPUT", str(output))
     assert run("--all", str(root), "--github", "--output", "sarif", "--report", str(report)) == 1
-    assert json.loads(report.read_text())["runs"][0]["properties"]["droppedResults"] >= 1
-    assert output.read_text() == "complete=false\n"
+    assert json.loads(report.read_text(encoding="utf-8"))["runs"][0]["properties"]["droppedResults"] >= 1
+    assert output.read_text(encoding="utf-8") == "complete=false\n"
 
 
 def test_github_output_not_written_when_report_fails(tmp_path: Path, monkeypatch):

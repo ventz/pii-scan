@@ -388,7 +388,7 @@ def test_re2_rule_scans_file_with_undecodable_byte(tmp_path: Path):
     report = tmp_path / "r.jsonl"
     code = run("--all", str(root), "--custom-regex", str(rules), "--output", "jsonl", "--report", str(report))
     assert code == 1
-    recs = [json.loads(line) for line in report.read_text().splitlines()]
+    recs = [json.loads(line) for line in report.read_text(encoding="utf-8").splitlines()]
     starts = sorted(r["start"] for r in recs if r["kind"] == "finding" and r["type"] == "CUSTOM:EMP")
     assert starts == [3, 19 + 9000 + 1 + 2]
 

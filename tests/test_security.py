@@ -25,7 +25,7 @@ def run(*args: str) -> int:
 
 
 def records(path: Path) -> list[dict]:
-    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
 # --- untrusted configuration -------------------------------------------------------------------
@@ -129,8 +129,8 @@ def test_output_path_symlinked_parent_is_refused(tmp_path: Path):
 def test_mask_from_rechecks_regex_when_findings_are_deleted(tree: Path, tmp_path: Path):
     report, out = tmp_path / "r.jsonl", tmp_path / "masked"
     run("--all", str(tree), "--output", "jsonl", "--report", str(report), "--fail-on", "never")
-    kept = [line for line in report.read_text().splitlines() if '"kind":"finding"' not in line]
-    report.write_text("\n".join(kept) + "\n")
+    kept = [line for line in report.read_text(encoding="utf-8").splitlines() if '"kind":"finding"' not in line]
+    report.write_text("\n".join(kept) + "\n", encoding="utf-8")
     assert main(["mask", "--from", str(report), "--out", str(out), "-q"]) == 0
     masked = (out / "hr" / "people.txt").read_text()
     assert "123-45-6789" not in masked and "AKIAIOSFODNN7EXAMPLE" not in masked

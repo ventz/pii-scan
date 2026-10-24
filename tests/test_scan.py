@@ -19,7 +19,7 @@ def run(*args: str) -> int:
 
 
 def records(path: Path) -> list[dict]:
-    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
 # --- regex -------------------------------------------------------------------------------------
@@ -82,7 +82,7 @@ def test_full_scan_jsonl(tree: Path, tmp_path: Path):
     assert summary["kind"] == "summary"
     assert summary["excluded_reasons"].get("symlink") == 1
     assert summary["excluded_reasons"].get("binary") == 1
-    raw = report.read_text()
+    raw = report.read_text(encoding="utf-8")
     for secret in ("AKIAIOSFODNN7EXAMPLE", "123-45-6789", "P@ssw0rd123!", "hunter2secret"):
         assert secret not in raw  # values never reach reports by default
     ssn = [r for r in recs if r["kind"] == "finding" and r["relpath"] == "hr/crlf.txt"]

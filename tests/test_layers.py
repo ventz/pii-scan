@@ -52,7 +52,7 @@ def aws(monkeypatch):
 def scan(tmp_path: Path, text: str, layers, aws_session):
     root = tmp_path / "d"
     root.mkdir()
-    (root / "f.txt").write_text(text, encoding="utf-8")
+    (root / "f.txt").write_text(text, encoding="utf-8", newline="")  # LF offsets on Windows too
     s = Settings(paths=(str(root),), scan_all=True, layers=("regex", *[type(x).name for x in []]),
                  fail_on=None, workers=1)  # fmt: skip
     sink = Collect()
@@ -106,9 +106,10 @@ def test_guardrails_matches_are_located(tmp_path, aws):
     assert session.usage.calls["guardrails"] == 1
 
 
-def test_guardrails_whitespace_normalized_match(tmp_path, aws):
+@pytest.mark.parametrize(("newline", "end"), [("\n", 14), ("\r\n", 15)], ids=["lf", "crlf"])
+def test_guardrails_whitespace_normalized_match(tmp_path, aws, newline, end):
     session, stubs = aws
-    text = "ask Jane\n  Roe please\n"
+    text = f"ask Jane{newline}  Roe please{newline}"
     hit = {"match": "Jane Roe", "type": "NAME", "action": "ANONYMIZED", "detected": True}
     stubs["bedrock-runtime"].add_response(
         "apply_guardrail",
@@ -118,7 +119,7 @@ def test_guardrails_whitespace_normalized_match(tmp_path, aws):
     )  # fmt: skip
     results, _ = scan(tmp_path, text, [GuardrailsDetector(session, TYPES)], session)
     (f,) = results[0].findings
-    assert (f.start, f.end) == (4, 14)
+    assert (f.start, f.end) == (4, end)
 
 
 def test_guardrail_without_active_pii_filter_aborts(tmp_path, aws):
