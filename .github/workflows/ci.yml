@@ -48,11 +48,9 @@ jobs:
 
   windows:
     # Windows protections (no-follow opens, ACLs, junctions) use Win32 calls that only run here.
-    # Informational until the job has passed once; then drop continue-on-error so it gates merges.
-    name: test (windows-latest, ${{ matrix.python }}, informational)
+    name: test (windows-latest, ${{ matrix.python }})
     runs-on: windows-latest
     timeout-minutes: 25
-    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
