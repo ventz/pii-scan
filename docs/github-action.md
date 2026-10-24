@@ -32,7 +32,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0 # the diff base must be available
-      - uses: ventz/pii-scan@v1.2.1
+      - uses: ventz/pii-scan@v1.2.2
         with:
           fail-on: high
 ```
@@ -51,7 +51,7 @@ steps:
   - uses: actions/checkout@v7
     with:
       fetch-depth: 0
-  - uses: ventz/pii-scan@v1.2.1
+  - uses: ventz/pii-scan@v1.2.2
     with:
       upload-sarif: true
 ```
@@ -79,7 +79,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: ventz/pii-scan@v1.2.1
+      - uses: ventz/pii-scan@v1.2.2
         with:
           scan-all: 'true'
           upload-sarif: true
@@ -103,7 +103,7 @@ steps:
     with:
       role-to-assume: arn:aws:iam::123456789012:role/pii-scan-github
       aws-region: us-east-1
-  - uses: ventz/pii-scan@v1.2.1
+  - uses: ventz/pii-scan@v1.2.2
     with:
       layers: regex,contains,detect
       aws-region: us-east-1
@@ -193,7 +193,7 @@ pushes to `main`; widen the `sub` condition deliberately, for example to a prote
 
 ## Notes
 
-- **Pin the action.** Use a release tag (`@v1.2.1`) or, for the strongest guarantee, a full commit SHA.
+- **Pin the action.** Use a release tag (`@v1.2.2`) or, for the strongest guarantee, a full commit SHA.
 - **Policy lives in the workflow.** A pull request can edit files in its own tree, including the
   files passed as `config-file` and `custom-regex-file`. The action runs with
   `--restricted-config`, so those files can only add rules or raise severities; attempts to lower
