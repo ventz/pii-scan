@@ -1,6 +1,7 @@
 """Platform file-system safety: links, junctions, cloud placeholders, owner-only files, and names
 Windows can't store. Pure checks run everywhere; the Windows behavior runs on Windows CI."""
 
+import io
 import json
 import os
 import stat
@@ -559,3 +560,129 @@ def test_github_output_not_written_when_report_fails(tmp_path: Path, monkeypatch
     monkeypatch.setenv("GITHUB_OUTPUT", str(output))
     assert run("--all", str(root), "--github", "--output", "sarif", "--report", str(report)) == 2
     assert not output.exists()
+
+
+# --- report on stdout ----------------------------------------------------------------------------
+
+
+def _ansi_stdout(monkeypatch, *, windows: bool, name: str = "stdout"):
+    """A redirected stdout (or stderr) as Windows sets it up when the ANSI code page is cp1252."""
+    buffer = io.BytesIO()
+    stream = io.TextIOWrapper(buffer, encoding="cp1252", newline="\r\n")  # worst case: translates \n
+    monkeypatch.setattr(sys, name, stream)
+    monkeypatch.setattr("pii_scan.cli.WINDOWS", windows)
+    return stream, buffer
+
+
+NON_ASCII_NAME = "café-日本-\U0001f642.txt"  # Latin-1, BMP, and astral (a surrogate pair in UTF-16)
+
+
+@pytest.mark.parametrize("fmt", ["jsonl", "json", "sarif", "csv", "text"])
+def test_report_on_stdout_is_utf8_on_windows(tmp_path: Path, monkeypatch, fmt):
+    root = tmp_path / "share"
+    root.mkdir()
+    (root / NON_ASCII_NAME).write_text("Café SSN 123-45-6789\n", encoding="utf-8")
+    stream, buffer = _ansi_stdout(monkeypatch, windows=True)
+    assert run("--all", str(root), "--output", fmt) == 1
+    stream.flush()
+    data = buffer.getvalue()
+    text = data.decode("utf-8")  # strict: the whole report is valid UTF-8
+    assert NON_ASCII_NAME in text
+    assert "\\U0001f642" not in text
+    assert b"\r\r\n" not in data
+    if fmt == "csv":
+        assert data.endswith(b"\r\n")  # csv module's CRLF rows, as in a --report file
+    else:
+        assert b"\r\n" not in data  # no CRLF surprises in jsonl, json, sarif, or text
+    if fmt == "jsonl":
+        records = [json.loads(line) for line in text.splitlines()]
+        assert any(NON_ASCII_NAME in json.dumps(r, ensure_ascii=False) for r in records)
+    elif fmt in ("json", "sarif"):
+        assert NON_ASCII_NAME in json.dumps(json.loads(text), ensure_ascii=False)
+
+
+def test_report_on_stdout_matches_report_file(tmp_path: Path, monkeypatch):
+    root = tmp_path / "share"
+    root.mkdir()
+    (root / NON_ASCII_NAME).write_text("SSN 123-45-6789\n", encoding="utf-8")
+    monkeypatch.setenv("PII_SCAN_HMAC_KEY", "test-key-0123456789abcdef")  # stable fingerprints
+    report = tmp_path / "r.csv"
+    assert run("--all", str(root), "--output", "csv", "--report", str(report)) == 1
+    stream, buffer = _ansi_stdout(monkeypatch, windows=True)
+    assert run("--all", str(root), "--output", "csv") == 1
+    stream.flush()
+    assert buffer.getvalue() == report.read_bytes()
+
+
+def test_report_stdout_keeps_backslashreplace_for_lone_surrogates(monkeypatch):
+    # reconfigure(encoding=...) resets errors to strict; a lone surrogate (from surrogateescape,
+    # e.g. a --show-values preview) must still be escaped, not crash the report.
+    from pii_scan.cli import _utf8_on_windows
+
+    stream, buffer = _ansi_stdout(monkeypatch, windows=True)
+    stream.reconfigure(errors="backslashreplace")  # as main() sets it
+    out = _utf8_on_windows(sys.stdout)
+    out.write("bad-\udcff-\U0001f642\n")
+    out.flush()
+    assert buffer.getvalue() == "bad-\\udcff-\U0001f642\n".encode()
+
+
+def test_report_stdout_unchanged_off_windows(monkeypatch):
+    from pii_scan.cli import _utf8_on_windows
+
+    stream, _ = _ansi_stdout(monkeypatch, windows=False)
+    assert _utf8_on_windows(sys.stdout) is stream
+    assert stream.encoding == "cp1252"
+
+
+@pytest.mark.parametrize(("args", "target"), [
+    (("--output", "jsonl", "--report", "REPORT"), "stdout"),  # the Action's form
+    (("--output", "text"), "stdout"),  # annotations follow the text report
+    (("--output", "jsonl"), "stderr"),  # stdout carries the report, so annotations go to stderr
+])  # fmt: skip
+def test_github_annotations_are_utf8_on_windows(tmp_path: Path, monkeypatch, args, target):
+    root = tmp_path / "share"
+    root.mkdir()
+    (root / NON_ASCII_NAME).write_text("SSN 123-45-6789\n", encoding="utf-8")
+    args = tuple(str(tmp_path / "r.jsonl") if a == "REPORT" else a for a in args)
+    stream, buffer = _ansi_stdout(monkeypatch, windows=True, name=target)
+    if target == "stderr":
+        _ansi_stdout(monkeypatch, windows=True)  # keep the report out of pytest's capture
+    # A faked WINDOWS would send --report through winapi; this test is about the annotations.
+    # cmd_scan closes the report stream itself.
+    plain_open = lambda path: open(path, "w", encoding="utf-8", newline="")  # noqa: E731, SIM115
+    monkeypatch.setattr("pii_scan.cli._open_report", plain_open)
+    assert run("--all", str(root), "--github", *args) == 1
+    stream.flush()
+    data = buffer.getvalue()
+    lines = [line for line in data.decode("utf-8").split("\n") if line.startswith("::")]  # strict UTF-8
+    assert lines
+    assert all(f"{NON_ASCII_NAME},line=" in line for line in lines)  # file= is the real path
+    assert b"\r\n" not in data
+
+
+def test_github_annotations_stream_unchanged_off_windows(tmp_path: Path, monkeypatch):
+    root = tmp_path / "share"
+    root.mkdir()
+    (root / "a.txt").write_text("SSN 123-45-6789\n", encoding="utf-8")
+    _ansi_stdout(monkeypatch, windows=False)
+    stream, _ = _ansi_stdout(monkeypatch, windows=False, name="stderr")
+    assert run("--all", str(root), "--github", "--output", "jsonl") == 1
+    assert stream.encoding == "cp1252"
+
+
+def test_stderr_switches_before_the_first_message(tmp_path: Path, monkeypatch):
+    # With annotations on stderr, a warning written before the scan must already be UTF-8 and LF.
+    root = tmp_path / "share"
+    root.mkdir()
+    (root / NON_ASCII_NAME).write_text("SSN 123-45-6789\n", encoding="utf-8")
+    _ansi_stdout(monkeypatch, windows=True)
+    stream, buffer = _ansi_stdout(monkeypatch, windows=True, name="stderr")
+    args = ("--all", str(root), "--github", "--output", "jsonl", "--show-values", "--cache", str(tmp_path / "c.db"))
+    assert main([*args, "--progress", "none"]) == 1
+    stream.flush()
+    data = buffer.getvalue()
+    text = data.decode("utf-8")
+    assert "--cache is ignored" in text.split("::", 1)[0]  # the warning came before the annotations
+    assert NON_ASCII_NAME in text
+    assert b"\r\n" not in data

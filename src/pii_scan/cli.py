@@ -379,6 +379,11 @@ def hmac_key(required: bool) -> bytes | None:
 
 def cmd_scan(args: argparse.Namespace) -> int:
     s = settings_from_args(args)
+    # Annotations go to stderr when stdout carries a non-text report. Switch it before the first
+    # message, so a redirected stderr log on Windows has one encoding and one line ending.
+    gh_stream = None
+    if s.github:
+        gh_stream = _utf8_on_windows(sys.stdout if s.report or s.output == "text" else sys.stderr)
     console = Console(quiet=s.quiet, verbose=s.verbose, progress=s.progress)
     for w in s.warnings:
         console.warn(w)
@@ -449,15 +454,14 @@ def cmd_scan(args: argparse.Namespace) -> int:
     elif s.cache:
         cache = ResultCache(s.cache, config_hash(s, rules, key))
 
-    out_stream = _open_report(s.report) if s.report else sys.stdout
+    out_stream = _open_report(s.report) if s.report else _utf8_on_windows(sys.stdout)
     try:
         if s.output == "sarif":
             primary = SarifSink(out_stream, stable_fingerprints=key is not None)
         else:
             primary = {"text": TextSink, "json": JsonSink, "jsonl": JsonlSink, "csv": CsvSink}[s.output](out_stream)
         sinks = [primary]  # closed in order: the report is complete before GithubSink writes `complete`
-        if s.github:
-            gh_stream = sys.stdout if s.report or s.output == "text" else sys.stderr
+        if gh_stream is not None:
             sinks.append(GithubSink(gh_stream, s.fail_on))
         from .pipeline import Scanner
 
@@ -478,6 +482,21 @@ def cmd_scan(args: argparse.Namespace) -> int:
         console.info(f"Wrote {len(scanner.baseline_keys):,} baseline entries to {s.write_baseline}")
     console.summary(summary, mask_out=str(s.mask_out) if s.mask_out else None)
     return summary.exit_code(s.allow_incomplete)
+
+
+def _utf8_on_windows(stream):  # noqa: ANN001, ANN202 - text stream
+    """Make a standard stream that carries a report or GitHub annotations UTF-8 on Windows.
+
+    Redirected stdout and stderr on Windows use the ANSI code page (often cp1252), so
+    `--output jsonl > r.jsonl` garbled or escaped any path it couldn't encode, and an annotation's
+    `file=` no longer matched the path on a Windows runner, which reads step output as UTF-8.
+    Elsewhere the stream keeps the locale's encoding. newline="" writes line endings unchanged, as
+    --report does: CSV rows end in CRLF and everything else in LF. errors= must be repeated, or
+    reconfigure resets it to "strict".
+    """
+    if WINDOWS and hasattr(stream, "reconfigure"):
+        stream.reconfigure(encoding="utf-8", errors="backslashreplace", newline="")
+    return stream
 
 
 def _open_report(path: Path):  # noqa: ANN202 - text stream

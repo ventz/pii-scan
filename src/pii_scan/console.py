@@ -1,4 +1,4 @@
-"""Human-facing output on stderr: progress, warnings, and the final summary (plain ASCII)."""
+"""Human-facing output on stderr: progress, warnings, and the final summary (no color or emoji)."""
 
 from __future__ import annotations
 

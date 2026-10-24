@@ -6,6 +6,20 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-10-24
+
+### Fixed
+
+- **Windows: reports written to stdout are UTF-8.** `pii-scan --output jsonl > r.jsonl` used
+  the console code page (often cp1252), so a non-ASCII path came out as invalid UTF-8 or as a
+  `\U...` escape that breaks JSON and `pii-scan mask --from`. stdout now gets the same UTF-8 and
+  line endings as a `--report` file. Other platforms are unchanged.
+- **Windows: GitHub annotations are UTF-8.** With `--github` on a Windows runner, an annotation
+  for a file with a non-ASCII name named the file in the console code page, so it didn't attach
+  to that file. Annotations, on stdout or stderr, are now UTF-8 on Windows. This includes the
+  GitHub Action, which passes `--report --github`. When annotations go to stderr, the messages
+  that share it are UTF-8 too, from the first line.
+
 ## [1.2.1] - 2026-10-23
 
 ### Fixed

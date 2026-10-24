@@ -101,7 +101,14 @@ Baselines key findings by path (relative to the working directory, so the same b
 | `-q`, `--quiet` | off | Only findings and errors |
 
 stdout carries only the selected format; progress, warnings, errors, and the summary go to stderr.
-Output is plain ASCII with no color or emoji.
+A `--report` file is always UTF-8. On Windows, a report on stdout is UTF-8 too, with the same
+bytes as a `--report` file, whatever the console code page or `PYTHONIOENCODING`; elsewhere
+stdout follows the locale. `--github` annotations (on stdout, or on stderr when stdout carries
+the report) are UTF-8 on Windows too, as GitHub expects. Windows PowerShell 5.1 re-encodes `>`
+redirection (as UTF-16), so use `--report` there; `cmd.exe`, Git Bash, and PowerShell 7.4+ keep
+the bytes.
+Messages have no color or emoji; control characters in paths are escaped. On Windows, when
+`--github` annotations go to stderr, the messages there are UTF-8 too.
 
 | Format | Shape | Best for |
 |--------|-------|----------|
