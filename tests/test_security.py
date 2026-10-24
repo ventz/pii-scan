@@ -143,7 +143,7 @@ def test_mask_from_rechecks_regex_when_findings_are_deleted(tree: Path, tmp_path
     "-eyJ" * 250_000,
     "-----BEGIN PRIVATE KEY-----\n" * 40_000,
     "eyJ" + "a" * 1_000_000,
-])  # fmt: skip
+], ids=["jwt-dashes", "pem-headers", "jwt-run"])  # fmt: skip
 def test_builtin_regex_is_fast_on_adversarial_input(payload):
     started = time.perf_counter()
     RegexDetector(BUILTIN_RULES, max_matches_per_rule=10**9).detect(payload)

@@ -17,7 +17,8 @@ def sev(t: str) -> Severity:
 # --- chunking -------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("text", ["a" * 5000, "é" * 3050, "😀x" * 900, "line\n" * 2000, ""])
+@pytest.mark.parametrize("text", ["a" * 5000, "é" * 3050, "😀x" * 900, "line\n" * 2000, ""],
+                         ids=["ascii", "two-byte", "astral", "lines", "empty"])
 @pytest.mark.parametrize("max_bytes", [64, 500, 4096])
 def test_chunks_respect_byte_limit_and_cover_text(text, max_bytes):
     got = list(chunks(text, max_bytes, overlap_chars=16))

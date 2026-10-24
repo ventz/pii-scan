@@ -14,7 +14,9 @@ end=$((SECONDS + deadline))
 while kill -0 "$pid" 2>/dev/null && ((SECONDS < end)); do
   sleep 5
 done
-cat "$log"
+# Very long lines stall the runner's log processing; the uploaded artifact keeps them whole.
+echo "(lines longer than 4000 bytes are cut here; see the $log artifact)"
+cut -c1-4000 "$log"
 if kill -0 "$pid" 2>/dev/null; then
   echo "::error::pytest still running after ${deadline}s; see the last test started in $log"
   kill -9 "$pid" 2>/dev/null
