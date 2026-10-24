@@ -455,7 +455,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
             primary = SarifSink(out_stream, stable_fingerprints=key is not None)
         else:
             primary = {"text": TextSink, "json": JsonSink, "jsonl": JsonlSink, "csv": CsvSink}[s.output](out_stream)
-        sinks = [primary]
+        sinks = [primary]  # closed in order: the report is complete before GithubSink writes `complete`
         if s.github:
             gh_stream = sys.stdout if s.report or s.output == "text" else sys.stderr
             sinks.append(GithubSink(gh_stream, s.fail_on))

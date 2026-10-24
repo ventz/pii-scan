@@ -502,3 +502,59 @@ def test_directory_with_trailing_dot_is_listed_exactly(tmp_path: Path):
     run("--all", str(root), "--output", "jsonl", "--report", str(report), "--fail-on", "never")
     recs = [json.loads(line) for line in report.read_text().splitlines()]
     assert any(r["kind"] == "finding" and r["relpath"] == "dir./hidden.txt" for r in recs)
+
+
+@pytest.mark.parametrize(("content", "unreadable", "expected"), [
+    ("nothing here\n", False, "true"),
+    ("ssn 123-45-6789\n", False, "true"),
+    ("ssn 123-45-6789\n", True, "false"),  # exit code 1, but a file was not scanned
+])  # fmt: skip
+def test_github_output_says_whether_the_scan_was_complete(tmp_path: Path, monkeypatch, content, unreadable, expected):
+    root = tmp_path / "share"
+    root.mkdir()
+    (root / "a.txt").write_text(content)
+    if unreadable:
+        (root / "big.txt").write_text("x" * 2000)
+    output = tmp_path / "github_output"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+    code = run("--all", str(root), "--github", "--max-file-size", "1000")
+    assert code == (1 if "ssn" in content else 0)
+    assert output.read_text() == f"complete={expected}\n"
+
+
+def test_github_output_incomplete_even_when_allowed(tmp_path: Path, monkeypatch):
+    root = tmp_path / "share"
+    root.mkdir()
+    (root / "big.txt").write_text("x" * 2000)
+    output = tmp_path / "github_output"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+    assert run("--all", str(root), "--github", "--max-file-size", "1000", "--allow-incomplete") == 0
+    assert output.read_text() == "complete=false\n"
+
+
+def test_github_output_incomplete_when_sarif_is_truncated(tmp_path: Path, monkeypatch):
+    root = tmp_path / "share"
+    root.mkdir()
+    (root / "a.txt").write_text("ssn 123-45-6789\nssn 123-45-6780\nssn 123-45-6781\n")
+    monkeypatch.setattr("pii_scan.sinks.SARIF_MAX_RESULTS", 2)
+    output, report = tmp_path / "github_output", tmp_path / "r.sarif"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+    assert run("--all", str(root), "--github", "--output", "sarif", "--report", str(report)) == 1
+    assert json.loads(report.read_text())["runs"][0]["properties"]["droppedResults"] >= 1
+    assert output.read_text() == "complete=false\n"
+
+
+def test_github_output_not_written_when_report_fails(tmp_path: Path, monkeypatch):
+    # The report sink closes first; if it fails, `complete` must never say true.
+    root = tmp_path / "share"
+    root.mkdir()
+    (root / "a.txt").write_text("nothing here\n")
+
+    def broken(self, summary):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr("pii_scan.sinks.SarifSink.close", broken)
+    output, report = tmp_path / "github_output", tmp_path / "r.sarif"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+    assert run("--all", str(root), "--github", "--output", "sarif", "--report", str(report)) == 2
+    assert not output.exists()

@@ -187,6 +187,8 @@ class SarifSink:
             self.results.append(result)
 
     def close(self, summary: Summary) -> None:
+        if self.dropped:
+            summary.report_truncated = True  # GithubSink, closed after this sink, reports it
         doc = {
             "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
             "version": "2.1.0",
@@ -225,6 +227,17 @@ class GithubSink:
             self.stream.write(f"::{kind} {props}::{_data(f'{f.type} detected by {f.detector}: {f.preview}')}\n")
 
     def close(self, summary: Summary) -> None:
+        self._write_summary(summary)
+        output = os.environ.get("GITHUB_OUTPUT")
+        if output:
+            # Step output for workflows, written last: exit code 1 (findings) doesn't say whether
+            # every file was scanned, and a partial SARIF upload could close code-scanning alerts
+            # that still exist. A report cut off at its result cap is partial too.
+            complete = not (summary.incomplete or summary.report_truncated)
+            with Path(output).open("a", encoding="utf-8") as fh:
+                fh.write(f"complete={'true' if complete else 'false'}\n")
+
+    def _write_summary(self, summary: Summary) -> None:
         path = os.environ.get("GITHUB_STEP_SUMMARY")
         if not path:
             return
@@ -238,6 +251,8 @@ class GithubSink:
                 lines.append(f"| {sev.capitalize()} findings | {summary.by_severity[sev]:,} |")
         if self.hidden:
             lines += ["", f"{self.hidden:,} more findings are not annotated; see the uploaded report."]
+        if summary.report_truncated:
+            lines += ["", "The report was cut off at its result limit, so it is incomplete."]
         with Path(path).open("a", encoding="utf-8") as fh:
             fh.write("\n".join(lines) + "\n")
 

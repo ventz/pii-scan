@@ -94,7 +94,7 @@ Baselines key findings by path (relative to the working directory, so the same b
 |------|---------|-------------|
 | `--output FORMAT` | `text` | `text`, `json`, `jsonl`, `csv`, or `sarif` |
 | `--report FILE` | stdout | Write the formatted output to a file (mode `0600`; on Windows, an ACL for the current user and SYSTEM only) |
-| `--github` | off | Add GitHub annotations and a job summary |
+| `--github` | off | Add GitHub annotations and a job summary, and write a `complete=true` or `complete=false` step output (every file scanned and the report whole) to `$GITHUB_OUTPUT` |
 | `--show-values` | off | Print raw values (refused when `CI` is set) |
 | `--progress auto\|lines\|none` | `auto` | Progress on stderr: a redrawn line on a terminal, plain lines every 30 s otherwise |
 | `-v`, `--verbose` | off | More detail on stderr |
@@ -242,4 +242,5 @@ Skipped files are counted by reason in the summary.
 | `AWS_ENDPOINT_URL*` | Ignored unless `aws.endpoint_url` is set, so the environment can't redirect scanned text |
 | `CI` (and `GITHUB_ACTIONS`, `GITLAB_CI`, `JENKINS_URL`, `TF_BUILD`, `BUILDKITE`, `CIRCLECI`, and similar) | `--show-values` is refused; `CI` also makes progress default to plain lines |
 | `GITHUB_STEP_SUMMARY` | Target for the job summary with `--github` |
+| `GITHUB_OUTPUT` | Target for the `complete` step output with `--github` |
 | `GITHUB_BASE_REF` | Used to find the diff base in pull request workflows |

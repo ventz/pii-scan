@@ -6,6 +6,25 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-10-23
+
+### Fixed
+
+- **GitHub Action: the exit code is captured again.** The action's shell runs with `-e`, so a
+  scan that exited non-zero ended the step before its `exit-code` output was written: SARIF was
+  never uploaded for a scan with findings, and the result message was missing. The job still
+  failed.
+- **GitHub Action: SARIF is uploaded only when every file was scanned.** pii-scan with
+  `--github` now writes a `complete` step output (`true` or `false`), which the action also
+  exposes, and the upload requires it. Exit code `1` alone also covers a scan with findings that
+  left some files unscanned, whose partial SARIF could have closed alerts that still exist. A
+  SARIF report cut off at 25,000 results counts as incomplete too. With `allow-incomplete`, an
+  incomplete scan still passes but no longer uploads SARIF.
+- **GitHub Action: outside pull requests, SARIF is uploaded only with `scan-all: true`.** A
+  changed-files report uploaded for a branch made code scanning close the alerts in every file
+  that didn't change. The action now skips that upload and says why; run a full scan (for
+  example on a schedule) for code scanning on the default branch.
+
 ## [1.2.0] - 2026-10-23
 
 Windows support. One behavior change on macOS: see **Changed**.

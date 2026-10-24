@@ -70,7 +70,11 @@ jobs:
         env:
           PYTHON: ${{ matrix.python }}
         run: uv sync --locked --python "$PYTHON" --extra re2
-      - run: uv run --no-sync pytest -q
+      - name: Test
+        # A step timeout (unlike the job's) keeps the log; -v and the faulthandler dump name a
+        # test that hangs.
+        timeout-minutes: 10
+        run: uv run --no-sync pytest -v -o faulthandler_timeout=60
 
   lint:
     runs-on: ubuntu-latest
@@ -101,6 +105,9 @@ jobs:
           echo "nothing sensitive here" > ci-clean/notes.txt
           echo '{"rules": [{"id": "emp", "pattern": "EMP-[0-9]{6}"}]}' > ci-rules-re2.json
           echo '{"rules": [{"id": "emp", "pattern": "EMP-(?=[0-9])[0-9]{6}"}]}' > ci-rules-lookahead.json
+          # more matches than max_matches_per_rule (10,000): the file is not scanned
+          mkdir -p ci-match-limit
+          for _ in $(seq 10001); do echo "EMP-123456"; done > ci-match-limit/many.txt
       - name: Clean tree passes
         id: clean
         uses: ./
@@ -130,15 +137,31 @@ jobs:
           paths: ci-clean
           scan-all: 'true'
           custom-regex-file: ci-rules-lookahead.json
+      - name: Incomplete scan reports complete=false
+        id: incomplete
+        continue-on-error: true
+        uses: ./
+        with:
+          paths: ci-match-limit
+          scan-all: 'true'
+          custom-regex-file: ci-rules-re2.json
       - name: Check exit codes
         env:
           CLEAN: ${{ steps.clean.outputs.exit-code }}
+          CLEAN_COMPLETE: ${{ steps.clean.outputs.complete }}
+          SAMPLE_COMPLETE: ${{ steps.sample.outputs.complete }}
+          INCOMPLETE: ${{ steps.incomplete.outputs.exit-code }}
+          INCOMPLETE_COMPLETE: ${{ steps.incomplete.outputs.complete }}
           SAMPLE: ${{ steps.sample.outputs.exit-code }}
           RE2: ${{ steps.re2.outputs.exit-code }}
           LOOKAHEAD: ${{ steps.lookahead.outputs.exit-code }}
         run: |
           check() { [[ "$2" == "$3" ]] || { echo "::error::$1 exited ${2:-unknown}, expected $3"; exit 1; }; }
           check "clean scan" "$CLEAN" 0
+          check "clean scan complete" "$CLEAN_COMPLETE" true
+          check "sample scan complete" "$SAMPLE_COMPLETE" true
+          check "incomplete scan" "$INCOMPLETE" 3
+          check "incomplete scan complete" "$INCOMPLETE_COMPLETE" false
           check "sample scan" "$SAMPLE" 1
           check "RE2 custom rule" "$RE2" 0
           check "lookahead custom rule" "$LOOKAHEAD" 2

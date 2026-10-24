@@ -23,7 +23,8 @@ MongoDB: mongodb://user:hunter2secret@mongodb0.example.com:27017/admin
 
 @pytest.fixture(autouse=True)
 def _isolate_env(monkeypatch):
-    for var in ("CI", "GITHUB_ACTIONS", "GITHUB_BASE_REF", "PII_SCAN_HMAC_KEY", "GITHUB_STEP_SUMMARY"):
+    for var in ("CI", "GITHUB_ACTIONS", "GITHUB_BASE_REF", "PII_SCAN_HMAC_KEY", "GITHUB_STEP_SUMMARY",
+                "GITHUB_OUTPUT"):
         monkeypatch.delenv(var, raising=False)
 
 

@@ -1,6 +1,6 @@
 [project]
 name = "pii-scan"
-version = "1.2.0"
+version = "1.2.1"
 description = "Fast, fail-closed scanner that finds and masks PII and secrets across files, repositories, and file shares using regex validators and AWS Comprehend."
 readme = "README.md"
 license = "MIT"

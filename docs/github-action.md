@@ -32,7 +32,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0 # the diff base must be available
-      - uses: ventz/pii-scan@v1.2.0
+      - uses: ventz/pii-scan@v1.2.1
         with:
           fail-on: high
 ```
@@ -51,14 +51,39 @@ steps:
   - uses: actions/checkout@v7
     with:
       fetch-depth: 0
-  - uses: ventz/pii-scan@v1.2.0
+  - uses: ventz/pii-scan@v1.2.1
     with:
       upload-sarif: true
 ```
 
 Code scanning on private repositories requires GitHub Code Security. SARIF uploads are limited to
-25,000 results per run; pii-scan caps its output at that limit. The report is uploaded only when
-the scan completed (exit code `0` or `1`), so an incomplete scan can't close alerts that still exist.
+25,000 results per run; pii-scan caps its output at that limit, and a report cut off there is
+not uploaded. The report is uploaded only when every file was scanned (the `complete` output is
+`true` and the exit code is `0` or `1`), so an incomplete scan can't close alerts that still
+exist. Exit code `1` alone isn't enough: a scan with findings that also left files unscanned exits
+`1`. For the same reason, outside pull requests the report is uploaded only with `scan-all: true`:
+a changed-files report on a branch would close the alerts in every file that didn't change. For
+code scanning on the default branch, add a full scan of the whole repository (the default `paths`
+of `.`; uploads share one category, so a scan of only some paths would close the alerts in the
+others), for example on a schedule:
+
+```yaml
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+permissions:
+  contents: read
+  security-events: write
+jobs:
+  pii-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ventz/pii-scan@v1.2.1
+        with:
+          scan-all: 'true'
+          upload-sarif: true
+```
 
 ## AWS layers with OIDC
 
@@ -78,7 +103,7 @@ steps:
     with:
       role-to-assume: arn:aws:iam::123456789012:role/pii-scan-github
       aws-region: us-east-1
-  - uses: ventz/pii-scan@v1.2.0
+  - uses: ventz/pii-scan@v1.2.1
     with:
       layers: regex,contains,detect
       aws-region: us-east-1
@@ -114,7 +139,8 @@ for those, or run AWS layers only on `push`.
 
 | Output | Description |
 |--------|-------------|
-| `exit-code` | `0` passed, `1` findings, `2` configuration error, `3` incomplete |
+| `exit-code` | `0` passed, `1` findings, `2` configuration or internal error, `3` incomplete, `130` interrupted |
+| `complete` | `true` when every file was scanned and the report is whole. `false` when some files were not scanned (with findings, exit code `1` takes precedence over `3`, and `allow-incomplete` can make it `0`), the SARIF report was cut off at 25,000 results, or the scan stopped early. Empty if no scan ran to its end (configuration error, crash). Read it together with `exit-code` |
 | `report-path` | Path of the report file, for example to upload with `actions/upload-artifact` |
 
 Reports contain file locations and placeholders, never matched values.
@@ -167,7 +193,7 @@ pushes to `main`; widen the `sub` condition deliberately, for example to a prote
 
 ## Notes
 
-- **Pin the action.** Use a release tag (`@v1.2.0`) or, for the strongest guarantee, a full commit SHA.
+- **Pin the action.** Use a release tag (`@v1.2.1`) or, for the strongest guarantee, a full commit SHA.
 - **Policy lives in the workflow.** A pull request can edit files in its own tree, including the
   files passed as `config-file` and `custom-regex-file`. The action runs with
   `--restricted-config`, so those files can only add rules or raise severities; attempts to lower

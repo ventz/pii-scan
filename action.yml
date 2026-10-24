@@ -86,11 +86,14 @@ inputs:
 
 outputs:
   exit-code:
-    description: '0 passed, 1 findings, 2 configuration error, 3 incomplete'
+    description: '0 passed, 1 findings, 2 configuration or internal error, 3 incomplete, 130 interrupted'
     value: ${{ steps.scan.outputs.exit-code }}
   report-path:
     description: 'Path of the report file'
     value: ${{ steps.scan.outputs.report-path }}
+  complete:
+    description: 'true when every file was scanned and the report is whole; false if not or if the scan stopped early; empty if no scan ran to its end'
+    value: ${{ steps.scan.outputs.complete }}
 
 runs:
   using: 'composite'
@@ -126,7 +129,7 @@ runs:
         EVENT_PR_BASE: ${{ github.event.pull_request.base.sha }}
         EVENT_BEFORE: ${{ github.event.before }}
       run: |
-        set -uo pipefail
+        set -euo pipefail  # -e is on anyway: `shell: bash` runs bash -e
 
         fail() { echo "::error title=pii-scan::$1"; exit 2; }
         is_bool() { [[ "$1" == "true" || "$1" == "false" ]] || fail "$2 must be true or false"; }
@@ -170,9 +173,13 @@ runs:
         [[ "$IN_VERBOSE" == "true" ]] && args+=(--verbose)
         [[ "$IN_QUIET" == "true" ]] && args+=(--quiet)
 
+        # Capture a non-zero exit instead of letting -e end the step, so exit-code is always set
+        # for the SARIF upload and "Enforce result" steps. pii-scan writes the `complete` output.
+        code=0
         # re2: custom rules from the tree must compile as linear-time RE2 under --restricted-config
-        uv run --quiet --locked --no-dev --extra re2 --project "$GITHUB_ACTION_PATH" pii-scan "${args[@]}"
-        code=$?
+        uv run --quiet --locked --no-dev --extra re2 --project "$GITHUB_ACTION_PATH" pii-scan "${args[@]}" || code=$?
+        # 1 without a `complete` output came from uv or a crash at startup, not from a finished scan
+        if [[ "$code" == 1 ]] && ! grep -q '^complete=' "$GITHUB_OUTPUT"; then code=2; fi
         {
           echo "exit-code=$code"
           echo "report-path=$report"
@@ -180,12 +187,29 @@ runs:
         exit 0
 
     - name: Upload SARIF
-      # only complete scans: a partial SARIF could make code scanning close alerts that still exist
-      if: ${{ always() && inputs.upload-sarif == 'true' && inputs.output-format == 'sarif' && (steps.scan.outputs.exit-code == '0' || steps.scan.outputs.exit-code == '1') }}
+      # Only complete scans: a partial SARIF could make code scanning close alerts that still exist.
+      # Exit code 1 can also mean findings plus files not scanned, so pii-scan's `complete` decides.
+      # Outside pull requests, only full scans: a changed-files SARIF on a branch would close the
+      # alerts in every file that didn't change.
+      if: ${{ always() && inputs.upload-sarif == 'true' && inputs.output-format == 'sarif' && steps.scan.outputs.complete == 'true' && (steps.scan.outputs.exit-code == '0' || steps.scan.outputs.exit-code == '1') && (inputs.scan-all == 'true' || github.event_name == 'pull_request') }}
       uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
       with:
         sarif_file: ${{ steps.scan.outputs.report-path }}
         category: pii-scan
+
+    - name: Explain skipped SARIF upload
+      if: ${{ always() && inputs.upload-sarif == 'true' && inputs.output-format == 'sarif' && steps.scan.outputs.exit-code != '' }}
+      shell: bash
+      env:
+        COMPLETE: ${{ steps.scan.outputs.complete }}
+        SCAN_ALL: ${{ inputs.scan-all }}
+        EVENT: ${{ github.event_name }}
+      run: |
+        if [[ "$COMPLETE" != "true" ]]; then
+          echo "::notice title=pii-scan::SARIF not uploaded: the scan was incomplete or the report was cut off at its result limit."
+        elif [[ "$SCAN_ALL" != "true" && "$EVENT" != "pull_request" ]]; then
+          echo "::notice title=pii-scan::SARIF not uploaded. Outside pull requests it is uploaded only with scan-all, because a changed-files report would close alerts in unchanged files."
+        fi
 
     - name: Enforce result
       shell: bash

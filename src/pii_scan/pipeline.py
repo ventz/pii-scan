@@ -59,6 +59,7 @@ class Summary:
     masked: int = 0
     aborted: str = ""
     interrupted: bool = False
+    report_truncated: bool = False  # set by a sink that had to drop results (SARIF's 25,000 cap)
     fail_on: Severity | None = None
     aws_usage: dict[str, Any] = field(default_factory=dict)
     not_scanned_examples: list[tuple[str, str]] = field(default_factory=list)
