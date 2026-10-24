@@ -33,6 +33,7 @@ Issues = "https://github.com/ventz/pii-scan/issues"
 [dependency-groups]
 dev = [
     "pytest>=8.3",
+    "pytest-timeout==2.4.0",  # the Windows CI job's per-test hang timeout
     "ruff>=0.12",
 ]
 

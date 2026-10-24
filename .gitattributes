@@ -1,0 +1,2 @@
+# Windows checkouts may convert to CRLF, which bash cannot run.
+*.sh text eol=lf

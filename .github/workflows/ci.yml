@@ -51,13 +51,20 @@ jobs:
     # Informational until the job has passed once; then drop continue-on-error so it gates merges.
     name: test (windows-latest, ${{ matrix.python }}, informational)
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
         # oldest and newest-but-one: ntpath.isabs changed for rooted paths ("\\data") in 3.13
         python: ['3.11', '3.13']
+    env:
+      # Hang diagnosis: earlier runs stalled with no log, and neither timeout ended the step.
+      # pytest-timeout dumps every thread's stack and exits from inside the process;
+      # pytest-bounded.sh ends the step at its deadline even if pytest can't be killed, and the
+      # logs are kept as an artifact. The likeliest suspects run first, in their own step.
+      SUSPECTS: junction or null_device or private
+      PYTHONUNBUFFERED: '1'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -70,11 +77,31 @@ jobs:
         env:
           PYTHON: ${{ matrix.python }}
         run: uv sync --locked --python "$PYTHON" --extra re2
-      - name: Test
-        # A step timeout (unlike the job's) keeps the log; -v and the faulthandler dump name a
-        # test that hangs.
-        timeout-minutes: 10
-        run: uv run --no-sync pytest -v -o faulthandler_timeout=60
+      - name: Test likely hangs
+        timeout-minutes: 9
+        shell: bash
+        run: bash .github/scripts/pytest-bounded.sh pytest-windows-suspects.log 420 -v --timeout=60 --timeout-method=thread tests/test_platform.py -k "$SUSPECTS"
+      - name: Test the rest
+        if: ${{ success() || failure() }}
+        timeout-minutes: 9
+        shell: bash
+        run: |
+          mapfile -t ids < <(/usr/bin/timeout -k 10 120 .venv/Scripts/python.exe -m pytest --collect-only -q \
+            tests/test_platform.py -k "$SUSPECTS" </dev/null | tr -d '\r' | grep -E '^tests/[^ ]+::')
+          (( ${#ids[@]} )) || { echo "::error::no suspect test IDs collected"; exit 1; }
+          deselect=()
+          for id in "${ids[@]}"; do deselect+=(--deselect "$id"); done
+          bash .github/scripts/pytest-bounded.sh pytest-windows-rest.log 360 -v --timeout=60 \
+            --timeout-method=thread "${deselect[@]}"
+      - name: Upload test logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pytest-windows-${{ matrix.python }}
+          path: pytest-windows*.log
+          if-no-files-found: warn
+          retention-days: 7
+          overwrite: true
 
   lint:
     runs-on: ubuntu-latest
